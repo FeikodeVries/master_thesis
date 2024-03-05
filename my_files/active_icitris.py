@@ -1,19 +1,19 @@
 import torch
-import cv2
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-import torch.utils.data as data
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor
 import numpy as np
-import pathlib
 from collections import OrderedDict, defaultdict
 
 from cleanrl.my_files import utils
+from cleanrl.my_files import encoder_decoder as coding
+from cleanrl.my_files import flow_modules as flow
+from cleanrl.my_files import causal_disentanglement as causal
 
 
-class iCITRISVAE(pl.LightningModule):
+class active_iCITRISVAE(pl.LightningModule):
     """ The main module implementing iCITRIS-VAE """
 
     def __init__(self, c_hid, num_latents, lr,
@@ -94,13 +94,13 @@ class iCITRISVAE(pl.LightningModule):
 
         # Encoder-Decoder init
         if not self.hparams.no_encoder_decoder:
-            self.encoder = utils.Encoder(num_latents=self.hparams.num_latents,
+            self.encoder = coding.Encoder(num_latents=self.hparams.num_latents,
                                    c_hid=self.hparams.c_hid,
                                    c_in=self.hparams.c_in,
                                    width=self.hparams.img_width,
                                    act_fn=act_fn_func,
                                    variational=True)
-            self.decoder = utils.Decoder(num_latents=self.hparams.num_latents,
+            self.decoder = coding.Decoder(num_latents=self.hparams.num_latents,
                                    c_hid=self.hparams.c_hid,
                                    c_out=self.hparams.c_in,
                                    width=self.hparams.img_width,
@@ -115,7 +115,7 @@ class iCITRISVAE(pl.LightningModule):
                                         lambda_sparse=self.hparams.lambda_sparse,
                                         graph_learning_method=self.hparams.graph_learning_method,
                                         autoregressive=self.hparams.autoregressive_prior)
-        self.intv_classifier = utils.InstantaneousTargetClassifier(
+        self.intv_classifier = causal.InstantaneousTargetClassifier(
             num_latents=self.hparams.num_latents,
             num_blocks=self.hparams.num_causal_vars,
             c_hid=self.hparams.c_hid * 2,
@@ -126,14 +126,14 @@ class iCITRISVAE(pl.LightningModule):
             gumbel_temperature=1.0,
             use_normalization=True,
             use_conditional_targets=True)
-        self.mi_estimator = utils.MIEstimator(num_latents=self.hparams.num_latents,
+        self.mi_estimator = causal.MIEstimator(num_latents=self.hparams.num_latents,
                                               num_blocks=self.hparams.num_causal_vars,
                                               c_hid=self.hparams.c_hid,
                                               var_names=self.hparams.var_names,
                                               momentum_model=0.9,
                                               gumbel_temperature=1.0)
         if self.hparams.use_flow_prior:
-            self.flow = utils.AutoregNormalizingFlow(self.hparams.num_latents,
+            self.flow = flow.AutoregNormalizingFlow(self.hparams.num_latents,
                                                num_flows=4,
                                                act_fn=nn.SiLU,
                                                hidden_per_var=16)

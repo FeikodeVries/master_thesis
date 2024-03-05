@@ -13,12 +13,12 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
-from my_files import my_wrappers as mywrapper
+from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
 
 import my_files.datahandling as dh
-from my_files.active_icitris import iCITRISVAE
-from my_files import my_wrappers as mywrapper
+from my_files.active_icitris import active_iCITRISVAE
+from my_files import custom_env_wrappers as mywrapper
 from my_files.datasets import ReacherDataset
 import my_files.utils as utils
 
@@ -102,7 +102,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, model, batch_size=100)
             env = gym.make(env_id, render_mode="rgb_array")
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = mywrapper.PixelWrapper(env, shape=64, rgb=True, batch_size=batch_size, model=model)
+        env = mywrapper.CausalWrapper(env, shape=64, rgb=True, batch_size=batch_size, model=model)
         env = gym.wrappers.FlattenObservation(env)
 
         env = gym.wrappers.ClipAction(env)
@@ -178,7 +178,7 @@ if __name__ == "__main__":
 
     # MYCODE
     parser = utils.get_default_parser()
-    parser.add_argument('--model', type=str, default='iCITRISVAE')
+    parser.add_argument('--model', type=str, default='active_iCITRISVAE')
     parser.add_argument('--c_hid', type=int, default=32)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
@@ -204,7 +204,7 @@ if __name__ == "__main__":
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
     batch_size_causal = 1000
-    citris = iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
+    citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
                         num_causal_vars=2)
     DataClass = ReacherDataset
     # END MYCODE

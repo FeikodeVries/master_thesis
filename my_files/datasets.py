@@ -151,16 +151,37 @@ class ReacherDataset(BaseDataset):
     CAUSAL_VAR_NAMES = ['base', 'root']
 
 
-class HalfCheetahDataset(BaseDataset):
+class WalkerDataset(BaseDataset):
     VAR_INFO = OrderedDict({
-        'base_x': 'continuous',
-        'base_y': 'continuous',
-        'base_vel_x': 'continuous',
-        'base_vel_y': 'continuous',
-        'tip_x': 'continuous',
-        'tip_y': 'continuous',
-        'tip_vel_x': 'continuous',
-        'tip_vel_y': 'continuous'
+        'right_foot_x': 'continuous',
+        'right_foot_y': 'continuous',
+        'right_foot_vel_x': 'continuous',
+        'right_foot_vel_y': 'continuous',
+        'left_foot_x': 'continuous',
+        'left_foot_y': 'continuous',
+        'left_foot_vel_x': 'continuous',
+        'left_foot_vel_y': 'continuous',
+        'right_low_leg_x': 'continuous',
+        'right_low_leg_y': 'continuous',
+        'right_low_leg_vel_x': 'continuous',
+        'right_low_leg_vel_y': 'continuous',
+        'left_low_leg_x': 'continuous',
+        'left_low_leg_y': 'continuous',
+        'left_low_leg_vel_x': 'continuous',
+        'left_low_leg_vel_y': 'continuous',
+        'right_upper_leg_x': 'continuous',
+        'right_upper_leg_y': 'continuous',
+        'right_upper_leg_vel_x': 'continuous',
+        'right_upper_leg_vel_y': 'continuous',
+        'left_upper_leg_x': 'continuous',
+        'left_upper_leg_y': 'continuous',
+        'left_upper_leg_vel_x': 'continuous',
+        'left_upper_leg_vel_y': 'continuous',
+        'torso_x': 'continuous',
+        'torso_y': 'continuous',
+        'torso_vel_x': 'continuous',
+        'torso_vel_y': 'continuous'
     })
 
-    CAUSAL_VAR_NAMES = ['base', 'root']
+    CAUSAL_VAR_NAMES = ['torso', 'right_upper_leg', 'right_lower_leg', 'right_foot',
+                        'left_upper_leg', 'left_lower_leg', 'left_foot']

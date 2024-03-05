@@ -17,11 +17,11 @@ import pathlib
 import torch.utils.data as data
 import pytorch_lightning as pl
 from torch.distributions.categorical import Categorical
-
+from my_files.datahandling import load_datasets
 
 import my_files.datahandling as dh
-from my_files.active_icitris import iCITRISVAE
-from my_files import my_wrappers as mywrapper
+from my_files.active_icitris import active_iCITRISVAE
+from my_files import custom_env_wrappers as mywrapper
 from my_files.datasets import ReacherDataset
 import my_files.utils as utils
 
@@ -88,7 +88,7 @@ def make_env(env_id, seed, idx, capture_video, run_name, model, batch_size=100):
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.PixelWrapper(env, shape=64, batch_size=batch_size, rgb=True, model=model)
+        env = mywrapper.CausalWrapper(env, shape=64, batch_size=batch_size, rgb=True, model=model)
         env = gym.wrappers.FlattenObservation(env)
 
         env = mywrapper.ActionWrapper(env, batch_size=batch_size)
@@ -175,7 +175,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     parser = utils.get_default_parser()
-    parser.add_argument('--model', type=str, default='iCITRISVAE')
+    parser.add_argument('--model', type=str, default='active_iCITRISVAE')
     parser.add_argument('--c_hid', type=int, default=2)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
@@ -201,8 +201,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    batch_size_causal = 500
-    citris = iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
+    batch_size_causal = 100
+    citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
                         num_causal_vars=args_citris.num_causal_vars)
     DataClass = ReacherDataset
     pl.seed_everything(42)
@@ -293,10 +293,10 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # MYCODE
         # Update VAE to better disentangle causal representation
         if (global_step+1) % batch_size_causal == 0:
-            datasets, data_loaders, data_name = utils.load_datasets(args_citris, 'Reacher')
+            datasets, data_loaders, data_name = load_datasets(args_citris, 'Reacher')
 
             model_args['num_causal_vars'] = datasets['train'].num_vars()
-            utils.train_model(model_class=iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
 
         # END MYCODE
 

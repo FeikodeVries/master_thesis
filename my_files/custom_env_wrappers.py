@@ -14,7 +14,7 @@ import cleanrl.my_files.datahandling as dh
 STATE_KEY = "state"
 
 
-class PixelWrapper(gym.ObservationWrapper):
+class CausalWrapper(gym.ObservationWrapper):
     """Augment observations by pixel values.
 
     Observations of this wrapper will be dictionaries of images.
