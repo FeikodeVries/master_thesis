@@ -1,46 +1,3 @@
-"""
-FRAMEWORK:
-• The map gθ from observations xt to latents zt and back
-• The assignment function ψ of latents to causal variables (matrix of RM ×(K+1) from which we sample via Gumbel softmax)
-• The prior distributions pθ (MLPs for conditional Gaussians)
-• The continuous-optimization causal discovery method for learning the instantaneous causal graph
-
-PSEUDOCODE:
-See page 42 of iCITRIS paper for detailed, original pseudocode (Algorithms 1, and 2)
-NOTEARS (active):
-
-Encode observations into latent space: zt = gθ (xt), zt+1 = gθ (xt+1)
-Differentiably sample one graphs G: Gij ∼ GumbelSoftmax(1 − σ(γij ), σ(γij ))
-Sample latent to causal assignments from ψ for each batch element
-for each causal variable Ci:
-    Determine parent mask
-    Calculate nlli
-Backpropagation loss Ln
-
-if step == batch_num:
-    Update acyclicity regulariser
-    Update sparsity regulariser
-    Update parameters φ, ψ, γ
-
-ENCO (active):
-
-each step:
-    Encode observations into latent space
-    Sample L graphs G1, ..., GL
-    Sample latent to causal assignment from ψ
-    for each graph Gl:
-        Determine parent sets for graph Gl
-        Calculate nlli
-    Backpropagation loss Ln
-    Average nll for causal factor Ci
-
-if step == batch_num:
-    Calculate theta gradients
-    Calculate gamma gradients
-    Update theta and gamma with the gradients calculated above
-    Update distribution and assignment parameters φ, ψ
-"""
-
 import torch
 import cv2
 import torch.nn as nn
@@ -50,21 +7,10 @@ import torch.utils.data as data
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor
 import numpy as np
-import os
+import pathlib
 from collections import OrderedDict, defaultdict
 
-import sys
-from torchvision import datasets
 from cleanrl.my_files import utils
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, datasets
-from matplotlib import pyplot as plt
-
-
-"""
---> The flattened image in original citris has the same shape as my regular version 
-Important to note, theirs has 4 first dimensions, not 3?
-"""
 
 
 class iCITRISVAE(pl.LightningModule):
@@ -87,7 +33,7 @@ class iCITRISVAE(pl.LightningModule):
                  no_encoder_decoder=False,
                  var_names=None,
                  autoregressive_prior=False,
-                 use_flow_prior=True,
+                 use_flow_prior=False,
                  cluster_logging=False,
                  **kwargs):
         """
@@ -181,11 +127,11 @@ class iCITRISVAE(pl.LightningModule):
             use_normalization=True,
             use_conditional_targets=True)
         self.mi_estimator = utils.MIEstimator(num_latents=self.hparams.num_latents,
-                                        num_blocks=self.hparams.num_causal_vars,
-                                        c_hid=self.hparams.c_hid,
-                                        var_names=self.hparams.var_names,
-                                        momentum_model=0.9,
-                                        gumbel_temperature=1.0)
+                                              num_blocks=self.hparams.num_causal_vars,
+                                              c_hid=self.hparams.c_hid,
+                                              var_names=self.hparams.var_names,
+                                              momentum_model=0.9,
+                                              gumbel_temperature=1.0)
         if self.hparams.use_flow_prior:
             self.flow = utils.AutoregNormalizingFlow(self.hparams.num_latents,
                                                num_flows=4,
@@ -200,19 +146,10 @@ class iCITRISVAE(pl.LightningModule):
                                                         start_factor=-6,
                                                         end_factor=4,
                                                         offset=10000)
-        #
-        # # Load causal encoder for triplet evaluation
-        # if self.hparams.causal_encoder_checkpoint is not None:
-        #     self.causal_encoder_true_epoch = int(1e5)  # We want to log the true causal encoder distance once
-        #     self.causal_encoder = CausalEncoder.load_from_checkpoint(self.hparams.causal_encoder_checkpoint)
-        #     for p in self.causal_encoder.parameters():
-        #         p.requires_grad_(False)
-        # else:
         self.causal_encoder = None
-        # # Logging
-        # self.all_val_dists = defaultdict(list)
-        # self.all_v_dicts = []
-        # self.prior_t1 = self.prior
+        self.all_val_dists = defaultdict(list)
+        self.all_v_dicts = []
+        self.prior_t1 = self.prior
 
     def forward(self, x):
         # Full encoding and decoding of samples
@@ -262,8 +199,6 @@ class iCITRISVAE(pl.LightningModule):
             imgs, labels, target = batch
         # En- and decode every element
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
-        # print(imgs.shape)
-        # print(imgs.flatten(0, 1).shape)
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])
         z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
@@ -272,8 +207,6 @@ class iCITRISVAE(pl.LightningModule):
         z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in
                                              [z_sample, z_mean, z_logstd, x_rec]]
 
-        # cv2.imshow('test', z_sample[0])
-        # cv2.waitKey(0)
         if self.hparams.use_flow_prior:
             init_nll = -utils.gaussian_log_prob(z_mean[:, 1:], z_logstd[:, 1:], z_sample[:, 1:]).sum(dim=-1)
             z_sample, ldj = self.flow(z_sample.flatten(0, 1))
@@ -290,7 +223,6 @@ class iCITRISVAE(pl.LightningModule):
             kld = -(p_z_x - p_z)
             kld = kld.unflatten(0, (imgs.shape[0], -1))
         else:
-
             # Calculate KL divergence between every pair of frames
             kld = self.prior.forward(z_sample=z_sample[:, 1:].flatten(0, 1),
                                      z_mean=z_mean[:, 1:].flatten(0, 1),
@@ -304,7 +236,6 @@ class iCITRISVAE(pl.LightningModule):
         rec_loss = F.mse_loss(x_rec, labels[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
         # Combine to full loss
         loss = (kld * self.hparams.beta_t1 + rec_loss).mean()
-
         # Target classifier
         loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
                                                   logger=self if not self.hparams.cluster_logging else None,
@@ -315,452 +246,41 @@ class iCITRISVAE(pl.LightningModule):
         # Mutual information estimator
         scheduler_factor = self.mi_scheduler.get_factor(self.global_step)
         loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
-                                                     logger=self if not self.hparams.cluster_logging else None,
+                                                     logger=None,
                                                      target=target,
                                                      transition_prior=self.prior,
                                                      instant_prob=scheduler_factor)
-        loss = loss + loss_model_mi + loss_z_mi * self.hparams.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
 
+        loss = loss + loss_model_mi + loss_z_mi * self.hparams.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
-        #
-        # # Logging
-        # self.log(f'{mode}_kld', kld.mean())
-        # self.log(f'{mode}_rec_loss_t1', rec_loss.mean())
-        # if not self.hparams.cluster_logging:
-        #     self.prior.logging(self)
-        # self.log(f'{mode}_intv_classifier_model', loss_model)
-        # self.log(f'{mode}_intv_classifier_z', loss_z)
-        # self.log(f'{mode}_mi_estimator_model', loss_model_mi)
-        # self.log(f'{mode}_mi_estimator_z', loss_z_mi)
-        # self.log(f'{mode}_mi_estimator_factor', scheduler_factor)
-        # self.log(f'{mode}_reg_loss', loss_z_reg)
-        #
+
         return loss
-
-    # def triplet_prediction(self, imgs, source):
-    #     """ Generates the triplet prediction of input image pairs and causal mask """
-    #     input_imgs = imgs[:, :2].flatten(0, 1)
-    #     z_mean, z_logstd = self.encoder(input_imgs)
-    #     if self.hparams.use_flow_prior:
-    #         z_mean, _ = self.flow(z_mean)
-    #     input_samples = z_mean
-    #     input_samples = input_samples.unflatten(0, (-1, 2))
-    #     # Map the causal mask to a latent variable mask
-    #     target_assignment = self.prior.get_target_assignment(hard=True)
-    #     if source.shape[-1] + 1 == target_assignment.shape[-1]:  # No-variables missing
-    #         source = torch.cat([source, source[..., -1:] * 0.0], dim=-1)
-    #     elif target_assignment.shape[-1] > source.shape[-1]:
-    #         target_assignment = target_assignment[..., :source.shape[-1]]
-    #     # Take the latent variables from image 1 respective to the mask, and image 2 the inverse
-    #     mask_1 = (target_assignment[None, :, :] * (1 - source[:, None, :])).sum(dim=-1)
-    #     mask_2 = 1 - mask_1
-    #     triplet_samples = mask_1 * input_samples[:, 0] + mask_2 * input_samples[:, 1]
-    #     if self.hparams.use_flow_prior:
-    #         triplet_samples = self.flow.reverse(triplet_samples)
-    #     # Decode the new combination
-    #     triplet_rec = self.decoder(triplet_samples)
-    #     return triplet_rec
-
-    # def triplet_evaluation(self, batch, mode='val'):
-    #     """ Evaluates the triplet prediction for a batch of images """
-    #     # Input handling
-    #     if len(batch) == 2:
-    #         imgs, source = batch
-    #         labels = imgs
-    #         latents = None
-    #         obj_indices = None
-    #     elif len(batch) == 3 and len(batch[1].shape) == 2:
-    #         imgs, source, latents = batch
-    #         labels = imgs
-    #         obj_indices = None
-    #     elif len(batch) == 3:
-    #         imgs, labels, source = batch
-    #         obj_indices = None
-    #         latents = None
-    #     elif len(batch) == 4 and len(batch[-1].shape) > 1:
-    #         imgs, labels, source, latents = batch
-    #         obj_indices = None
-    #     elif len(batch) == 4 and len(batch[-1].shape) == 1:
-    #         imgs, source, latents, obj_indices = batch
-    #         labels = imgs
-    #     triplet_label = labels[:, -1]
-    #     # Estimate triplet prediction
-    #     triplet_rec = self.triplet_prediction(imgs, source)
-    #
-    #     if self.causal_encoder is not None and latents is not None:
-    #         self.causal_encoder.eval()
-    #         # Evaluate the causal variables of the predicted output
-    #         with torch.no_grad():
-    #             losses, dists, norm_dists, v_dict = self.causal_encoder.get_distances(triplet_rec, latents[:, -1],
-    #                                                                                   return_norm_dists=True,
-    #                                                                                   return_v_dict=True)
-    #             self.all_v_dicts.append(v_dict)
-    #             rec_loss = sum([norm_dists[key].mean() for key in losses])
-    #             mean_loss = sum([losses[key].mean() for key in losses])
-    #             self.log(f'{mode}_distance_loss', mean_loss)
-    #             for key in dists:
-    #                 self.all_val_dists[key].append(dists[key])
-    #                 self.log(f'{mode}_{key}_dist', dists[key].mean())
-    #                 self.log(f'{mode}_{key}_norm_dist', norm_dists[key].mean())
-    #                 if obj_indices is not None:  # For excluded object shapes, record results separately
-    #                     for v in obj_indices.unique().detach().cpu().numpy():
-    #                         self.log(f'{mode}_{key}_dist_obj_{v}', dists[key][obj_indices == v].mean())
-    #                         self.log(f'{mode}_{key}_norm_dist_obj_{v}', norm_dists[key][obj_indices == v].mean())
-    #             if obj_indices is not None:
-    #                 self.all_val_dists['object_indices'].append(obj_indices)
-    #             if self.current_epoch > 0 and self.causal_encoder_true_epoch >= self.current_epoch:
-    #                 self.causal_encoder_true_epoch = self.current_epoch
-    #                 if len(triplet_label.shape) == 2 and hasattr(self, 'autoencoder'):
-    #                     triplet_label = self.autoencoder.decoder(triplet_label)
-    #                 _, true_dists = self.causal_encoder.get_distances(triplet_label, latents[:, -1])
-    #                 for key in dists:
-    #                     self.log(f'{mode}_{key}_true_dist', true_dists[key].mean())
-    #     else:
-    #         rec_loss = torch.zeros(1, )
-    #
-    #     return rec_loss
 
     def training_step(self, batch, batch_idx):
         loss = self._get_loss(batch, mode='train')
-        print(f'TESTPRINT: {loss}')
+        print(f'LOSS: {loss}')
         # self.log('train_loss', loss)
         return loss
-
-    # def validation_step(self, batch, batch_idx):
-    #     imgs, *_ = batch
-    #     loss = self.triplet_evaluation(batch, mode='val')
-    #     self.log('val_loss', loss)
-
-    def test_step(self, batch, batch_idx):
-        imgs, *_ = batch
-        loss = self.triplet_evaluation(batch, mode='test')
-        self.log('test_loss', loss)
 
     def training_epoch_end(self, *args, **kwargs):
         super().training_epoch_end(*args, **kwargs)
         self.prior.check_trainability()
 
-    # def validation_epoch_end(self, *args, **kwargs):
-    #     # Logging at the end of validation
-    #     super().validation_epoch_end(*args, **kwargs)
-    #     if len(self.all_val_dists.keys()) > 0:
-    #         if self.current_epoch > 0:
-    #             means = {}
-    #             if 'object_indices' in self.all_val_dists:
-    #                 obj_indices = torch.cat(self.all_val_dists['object_indices'], dim=0)
-    #                 unique_objs = obj_indices.unique().detach().cpu().numpy().tolist()
-    #             for key in self.all_val_dists:
-    #                 if key == 'object_indices':
-    #                     continue
-    #                 vals = torch.cat(self.all_val_dists[key], dim=0)
-    #                 if 'object_indices' in self.all_val_dists:
-    #                     for o in unique_objs:
-    #                         sub_vals = vals[obj_indices == o]
-    #                         key_obj = key + f'_obj_{o}'
-    #                         self.logger.experiment.add_histogram(key_obj, sub_vals, self.current_epoch)
-    #                         means[key_obj] = sub_vals.mean().item()
-    #                 else:
-    #                     self.logger.experiment.add_histogram(key, vals, self.current_epoch)
-    #                     means[key] = vals.mean().item()
-    #             log_dict(d=means,
-    #                      name='triplet_dists',
-    #                      current_epoch=self.current_epoch,
-    #                      log_dir=self.logger.log_dir)
-    #         self.all_val_dists = defaultdict(list)
-    #     if len(self.all_v_dicts) > 0:
-    #         outputs = {}
-    #         for key in self.all_v_dicts[0]:
-    #             outputs[key] = torch.cat([v[key] for v in self.all_v_dicts], dim=0).cpu().numpy()
-    #         np.savez_compressed(os.path.join(self.logger.log_dir, 'causal_encoder_v_dicts.npz'), **outputs)
-    #         self.all_v_dicts = []
+    def get_causal_rep(self, img):
+        """
+        Encode an image to latent space, retrieve the current latent to causal assignment and apply it to get the
+        minimal causal variables
+        :param img:
+        :return:
+        """
+        z_mean, z_logstd = self.encoder(img)
+        # if self.hparams.use_flow_prior: --> CAUSES SOME SERIOUS WARNINGS
+        #     z_mean, _ = self.flow(z_mean)
+        # Get latent assignment to causal vars in binary
+        target_assignment = self.prior.get_target_assignment(hard=True)
+        # Assign latent vals to their respective causal var
+        latent_causal_assignment = target_assignment * z_mean[0][:, None]
 
-    # @staticmethod
-    # def get_callbacks(exmp_inputs=None, dataset=None, cluster=False, correlation_dataset=None,
-    #                   correlation_test_dataset=None, **kwargs):
-    #     img_callback = ImageLogCallback(exmp_inputs, dataset, every_n_epochs=5 if not cluster else 50, cluster=cluster)
-    #     corr_callback = CorrelationMetricsLogCallback(correlation_dataset, cluster=cluster,
-    #                                                   test_dataset=correlation_test_dataset)
-    #     graph_callback = GraphLogCallback(every_n_epochs=(1 if not cluster else 5), dataset=dataset, cluster=cluster)
-    #     sparse_graph_callback = SparsifyingGraphCallback(dataset=dataset, cluster=cluster)
-    #     lr_callback = LearningRateMonitor('step')
-    #     return [lr_callback, img_callback, corr_callback, graph_callback, sparse_graph_callback]
-
-# class active_iCITRIS():
-#     """
-#     Simplified version of CITRIS to be extended later
-#     """
-#     def __init__(self, im_width=64, rgb=True):
-#         self.xt = None
-#         self.xt1 = None
-#         self.i = [1, 1]
-#         self.im_width = im_width
-#         self.rgb = rgb
-#         self.encoder = utils.Encoder(hidden_dims=2, num_latents=len(self.i),
-#                                      input_channels=3 if self.rgb else 2, im_width=self.im_width)
-#         self.decoder = utils.Decoder(num_latents=len(self.i), hidden_dims=2, c_out=3 if self.rgb else 2,
-#                                      width=self.im_width, num_blocks=1)
-#         #self.tsfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-#         self.tsfm = transforms.ToTensor()
-#
-#     def encode_pair_observation(self, img_path):
-#         data = datasets.ImageFolder(root=img_path, transform=self.tsfm)
-#         dataloader = DataLoader(data, batch_size=2, shuffle=False, drop_last=False)
-#
-#         for i, data in enumerate(dataloader):
-#             inputs, labels = data
-#             latent_mean, latent_logstd = self.encoder(inputs)
-#             latent_sample = latent_mean + torch.randn_like(latent_mean) * latent_logstd.exp()
-#             obs_reconstruction = self.decoder(latent_sample)
-#
-#             rec_loss = F.mse_loss(obs_reconstruction, inputs,
-#                                   reduction='none').sum(dim=list(range(2, len(obs_reconstruction.shape))))
-#             print(rec_loss.mean())
-#
-#             # TODO: Use sample for next steps
-#
-#     def train_vae_batch(self, img_path, batch_size):
-#         """
-#         Full encoding and decoding of samples
-#         :param img_path:
-#         :param batch_size:
-#         :return: cost of the observation reconstruction, the sample of the latent space, the latent space mean,
-#         and the latent space log standard
-#         """
-#         # TODO:  Test whether the VAE models are updated and not overridden --> look at reconstruction cost
-#         #   Find out what the deal is with the flattening and unflattening in
-#         #   the regular _get_loss (main training of VAE)
-#
-#         data = datasets.ImageFolder(root=img_path, transform=self.tsfm)
-#         dataloader = DataLoader(data, batch_size=batch_size, shuffle=False, drop_last=False)
-#
-#         for i, data in enumerate(dataloader):
-#             inputs, labels = data
-#             latent_mean, latent_logstd = self.encoder(inputs)
-#             latent_sample = latent_mean + torch.randn_like(latent_mean) * latent_logstd.exp()
-#             obs_reconstruction = self.decoder(latent_sample)
-#
-#             # Compare Reconstruction and original image
-#             # test_transform = transforms.ToPILImage()
-#             # input_img = test_transform(inputs[0])
-#             # input_img.show()
-#             # rec_img = test_transform(obs_reconstruction[0])
-#             # rec_img.show()
-#
-#             rec_loss = F.mse_loss(obs_reconstruction, inputs,
-#                                   reduction='none').sum(dim=list(range(2, len(obs_reconstruction.shape))))
-#             print(rec_loss.mean())
-#
-#
-#     def sample_l_graphs(self):
-#         pass
-#
-#     def sample_latent_to_causal(self):
-#         pass
-#
-#     def determine_parent_sets_graphs(self):
-#         pass
-#
-#     def calculate_backprop_loss_and_nll(self):
-#         pass
-#
-#     def update_gradients_and_params(self):
-#         pass
-
-
-# class active_iCITRIS(pl.LightningModule):
-#     """
-#     Lightning version of active CITRIS to be extended later
-#     """
-#     # TODO: Make the optimizer use parameters instead of hardcoded vals
-#     #   Make everything more readable
-#     #   Get the prior working
-#     #   Find out how the input for the prior function looks
-#     #   Training correlation encoder in original method?
-#     def __init__(self, im_width=64, rgb=True):
-#         super().__init__()
-#         self.save_hyperparameters()
-#         self.xt = None
-#         self.xt1 = None
-#         self.i = [1, 1]
-#         self.im_width = im_width
-#         self.rgb = rgb
-#         self.encoder = utils.Encoder(hidden_dims=2, num_latents=len(self.i)*2,
-#                                      input_channels=3 if self.rgb else 2, im_width=self.im_width)
-#         self.decoder = utils.Decoder(num_latents=len(self.i), hidden_dims=2, c_out=3 if self.rgb else 2,
-#                                      width=self.im_width, num_blocks=1)
-#
-#         self.prior = utils.InstantaneousPrior(num_latents=len(self.i)*2,
-#                                         hidden_dims=2,
-#                                         num_blocks=len(self.i),
-#                                         shared_inputs= len(self.i)*2,
-#                                         num_graph_samples=8,
-#                                         lambda_sparse=0.02,
-#                                         graph_learning_method='ENCO',
-#                                         autoregressive=False)
-#
-#         #self.tsfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-#         self.tsfm = transforms.ToTensor()
-#
-#     def forward(self, x):
-#         """
-#         Required Lightning method
-#         :param x:
-#         :return:
-#         """
-#         data = datasets.ImageFolder(root=x, transform=self.tsfm)
-#         dataloader = DataLoader(data, batch_size=512, shuffle=False, drop_last=False)
-#
-#         inputs, labels = data
-#         print(inputs.shape)
-#
-#         latent_mean, latent_logstd = self.encoder(inputs)
-#         latent_sample = latent_mean + torch.randn_like(latent_mean) * latent_logstd.exp()
-#
-#         obs_reconstruction = self.decoder(latent_sample)
-#         return obs_reconstruction, latent_sample, latent_mean, latent_logstd
-#
-#     def training_step(self, batch, batch_idx):
-#         """
-#         Required Lightning method
-#         :param batch:
-#         :param batch_idx:
-#         :return:
-#         """
-#         loss = self._get_loss(batch, mode='train')
-#         print(f"Train loss: {loss}")
-#         return loss
-#
-#     def configure_optimizers(self):
-#         """
-#         Required Lightning method
-#         :return:
-#         """
-#         # We use different learning rates for the target classifier (higher lr for faster learning).
-#         graph_params, counter_params, other_params = [], [], []
-#         for name, param in self.named_parameters():
-#             if name.startswith('prior.enco') or name.startswith('prior.notears'):
-#                 graph_params.append(param)
-#             elif name.startswith('intv_classifier') or name.startswith('mi_estimator'):
-#                 counter_params.append(param)
-#             else:
-#                 other_params.append(param)
-#         optimizer = optim.AdamW([{'params': graph_params, 'lr': 5e-4, 'weight_decay': 0.0, 'eps': 1e-8},
-#                                  {'params': counter_params, 'lr': 2*1e-3, 'weight_decay': 1e-4},
-#                                  {'params': other_params}], lr=1e-3, weight_decay=0.0)
-#         lr_scheduler = utils.CosineWarmupScheduler(optimizer,
-#                                              warmup=[200*100, 2*100, 2*100],
-#                                              offset=[500, 0, 0],
-#                                              max_iters=100)
-#         return [optimizer], [{'scheduler': lr_scheduler, 'interval': 'step'}]
-#
-#     def _get_loss(self, batch, mode='train'):
-#         """ Main training method for calculating the loss """
-#         for i, data in enumerate(batch):
-#             inputs, labels = data
-#         # En- and decode every element
-#         latent_mean, latent_logstd = self.encoder(inputs)
-#
-#         latent_sample = latent_mean + torch.randn_like(latent_mean) * latent_logstd.exp()
-#         obs_reconstruction = self.decoder(latent_sample)
-#
-#         # # Calculate KL divergence between every pair of frames
-#         # kld = self.prior.forward(latent_sample=latent_sample[:, 1:],
-#         #                          latent_mean=latent_mean[:, 1:],
-#         #                          latent_logstd=latent_logstd[:, 1:],
-#         #                          target=[],
-#         #                          latent_shared=latent_sample[:, :-1],
-#         #                          matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(self.global_step)))
-#         #
-#         # # Calculate reconstruction loss
-#         # rec_loss = F.mse_loss(obs_reconstruction, inputs, reduction='none').sum(dim=list(range(2, len(obs_reconstruction.shape))))
-#         # # Combine to full loss
-#         # loss = (kld * 2 + rec_loss).mean()
-#         # print(loss)
-#         # # Target classifier
-#         # loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
-#         #                                           logger=self if not self.hparams.cluster_logging else None,
-#         #                                           target=target,
-#         #                                           transition_prior=self.prior)
-#         # loss = loss + loss_model + loss_z * self.hparams.beta_classifier
-#         #
-#         # # Mutual information estimator
-#         # scheduler_factor = self.mi_scheduler.get_factor(self.global_step)
-#         # loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
-#         #                                              logger=self if not self.hparams.cluster_logging else None,
-#         #                                              target=target,
-#         #                                              transition_prior=self.prior,
-#         #                                              instant_prob=scheduler_factor)
-#         # loss = loss + loss_model_mi + loss_z_mi * self.hparams.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
-#         #
-#         # # For stabilizing the mean, since it is unconstrained
-#         # loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
-#         # loss = loss + 0.1 * loss_z_reg
-#         #
-#         # return loss
-#
-#     def encode_pair_observation(self, img_path):
-#         data = datasets.ImageFolder(root=img_path, transform=self.tsfm)
-#         dataloader = DataLoader(data, batch_size=2, shuffle=False, drop_last=False)
-#
-#         for i, data in enumerate(dataloader):
-#             inputs, labels = data
-#             latent_mean, latent_logstd = self.encoder(inputs)
-#             latent_sample = latent_mean + torch.randn_like(latent_mean) * latent_logstd.exp()
-#             obs_reconstruction = self.decoder(latent_sample)
-#
-#             rec_loss = F.mse_loss(obs_reconstruction, inputs,
-#                                   reduction='none').sum(dim=list(range(2, len(obs_reconstruction.shape))))
-#             print(rec_loss.mean())
-#
-#             # TODO: Use sample for next steps
-#
-#     def train_vae_batch(self, img_path, batch_size):
-#         """
-#         Full encoding and decoding of samples
-#         :param img_path:
-#         :param batch_size:
-#         :return: cost of the observation reconstruction, the sample of the latent space, the latent space mean,
-#         and the latent space log standard
-#         """
-#         # TODO:  Test whether the VAE models are updated and not overridden --> look at reconstruction cost
-#         #   Find out what the deal is with the flattening and unflattening in
-#         #   the regular _get_loss (main training of VAE)
-#
-#         data = datasets.ImageFolder(root=img_path, transform=self.tsfm)
-#         dataloader = DataLoader(data, batch_size=batch_size, shuffle=False, drop_last=False)
-#
-#
-#
-#
-#         for i, data in enumerate(dataloader):
-#             inputs, labels = data
-#             latent_mean, latent_logstd = self.encoder(inputs)
-#             latent_sample = latent_mean + torch.randn_like(latent_mean) * latent_logstd.exp()
-#             obs_reconstruction = self.decoder(latent_sample)
-#
-#         # Compare Reconstruction and original image
-#         # test_transform = transforms.ToPILImage()
-#         # input_img = test_transform(inputs[0])
-#         # input_img.show()
-#         # rec_img = test_transform(obs_reconstruction[0])
-#         # rec_img.show()
-#
-#         print(inputs.shape)
-#         print(inputs.flatten(0, 1).shape)
-#
-#     def sample_l_graphs(self):
-#         pass
-#
-#     def sample_latent_to_causal(self):
-#         pass
-#
-#     def determine_parent_sets_graphs(self):
-#         pass
-#
-#     def calculate_backprop_loss_and_nll(self):
-#         pass
-#
-#     def update_gradients_and_params(self):
-#         pass
+        return latent_causal_assignment

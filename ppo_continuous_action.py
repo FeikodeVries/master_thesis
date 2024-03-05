@@ -14,7 +14,14 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
 from my_files import my_wrappers as mywrapper
-from my_files import active_icitris
+import pytorch_lightning as pl
+
+import my_files.datahandling as dh
+from my_files.active_icitris import iCITRISVAE
+from my_files import my_wrappers as mywrapper
+from my_files.datasets import ReacherDataset
+import my_files.utils as utils
+
 
 @dataclass
 class Args:
@@ -44,7 +51,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "HalfCheetah-v4"
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 10000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -86,7 +93,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma):
+def make_env(env_id, idx, capture_video, run_name, gamma, model, batch_size=100):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
@@ -95,13 +102,11 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
             env = gym.make(env_id, render_mode="rgb_array")
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = mywrapper.PixelWrapper(env, shape=64, rgb=True, batch_size=512)
+        env = mywrapper.PixelWrapper(env, shape=64, rgb=True, batch_size=batch_size, model=model)
         env = gym.wrappers.FlattenObservation(env)
 
         env = gym.wrappers.ClipAction(env)
-        # DOESN'T WORK WITH PIXEL OBSERVATIONS
-        #env = gym.wrappers.NormalizeObservation(env)
-        #env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
@@ -171,6 +176,39 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+    # MYCODE
+    parser = utils.get_default_parser()
+    parser.add_argument('--model', type=str, default='iCITRISVAE')
+    parser.add_argument('--c_hid', type=int, default=32)
+    parser.add_argument('--decoder_num_blocks', type=int, default=1)
+    parser.add_argument('--act_fn', type=str, default='silu')
+    parser.add_argument('--num_latents', type=int, default=12)
+    parser.add_argument('--classifier_lr', type=float, default=4e-3)
+    parser.add_argument('--classifier_momentum', type=float, default=0.0)
+    parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
+    parser.add_argument('--classifier_use_normalization', action='store_true')
+    parser.add_argument('--classifier_use_conditional_targets', action='store_true')
+    parser.add_argument('--kld_warmup', type=int, default=0)
+    parser.add_argument('--beta_t1', type=float, default=1.0)
+    parser.add_argument('--gamma', type=float, default=1.0)
+    parser.add_argument('--lambda_reg', type=float, default=0.0)
+    parser.add_argument('--autoregressive_prior', action='store_true')
+    parser.add_argument('--beta_classifier', type=float, default=2.0)
+    parser.add_argument('--beta_mi_estimator', type=float, default=2.0)
+    parser.add_argument('--lambda_sparse', type=float, default=0.02)
+    parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
+    parser.add_argument('--graph_learning_method', type=str, default="ENCO")
+
+    datahandler = dh.DataHandling()
+
+    args_citris = parser.parse_args()
+    model_args = vars(args_citris)
+    batch_size_causal = 1000
+    citris = iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
+                        num_causal_vars=2)
+    DataClass = ReacherDataset
+    # END MYCODE
+
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -184,7 +222,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, model=citris, batch_size=args.num_steps) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -334,6 +372,12 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+        # # MYCODE
+        # datasets, data_loaders, data_name = utils.load_datasets(args_citris, 'Reacher')
+        #
+        # model_args['num_causal_vars'] = datasets['train'].num_vars()
+        # utils.train_model(model_class=iCITRISVAE, train_loader=data_loaders['train'], **model_args)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

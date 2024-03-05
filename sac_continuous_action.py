@@ -16,6 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 import pathlib
 import torch.utils.data as data
 import pytorch_lightning as pl
+from torch.distributions.categorical import Categorical
+
 
 import my_files.datahandling as dh
 from my_files.active_icitris import iCITRISVAE
@@ -48,7 +50,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Reacher-v4"
     """the environment id of the task"""
-    total_timesteps: int = 1000
+    total_timesteps: int = 10000
     """total timesteps of the experiments"""
     buffer_size: int = int(100)
     """the replay memory buffer size"""
@@ -58,7 +60,7 @@ class Args:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = 5e3
+    learning_starts: int = 1000
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -66,7 +68,7 @@ class Args:
     """the learning rate of the Q network network optimizer"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
-    target_network_frequency: int = 1  # Denis Yarats' implementation delays this by 2.
+    target_network_frequency: int = 2  # Denis Yarats' implementation delays this by 2.
     """the frequency of updates for the target nerworks"""
     noise_clip: float = 0.5
     """noise clip parameter of the Target Policy Smoothing Regularization"""
@@ -76,7 +78,7 @@ class Args:
     """automatic tuning of the entropy coefficient"""
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(env_id, seed, idx, capture_video, run_name, model, batch_size=100):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
@@ -86,10 +88,10 @@ def make_env(env_id, seed, idx, capture_video, run_name):
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.PixelWrapper(env, shape=64, batch_size=100, rgb=True)
+        env = mywrapper.PixelWrapper(env, shape=64, batch_size=batch_size, rgb=True, model=model)
         env = gym.wrappers.FlattenObservation(env)
 
-        env = mywrapper.ActionWrapper(env, batch_size=100)
+        env = mywrapper.ActionWrapper(env, batch_size=batch_size)
 
         env.action_space.seed(seed)
         return env
@@ -154,6 +156,8 @@ class Actor(nn.Module):
         log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
         log_prob = log_prob.sum(1, keepdim=True)
         mean = torch.tanh(mean) * self.action_scale + self.action_bias
+        # Simple dropout action masking
+        action = utils.mask_actions(action, True)
         return action, log_prob, mean
 
 
@@ -166,15 +170,16 @@ if __name__ == "__main__":
 poetry run pip install "stable_baselines3==2.0.0a1"
 """
         )
+    # MYCODE
     args = tyro.cli(Args)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=32)
+    parser.add_argument('--c_hid', type=int, default=2)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=16)
+    parser.add_argument('--num_latents', type=int, default=12)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -190,54 +195,18 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     parser.add_argument('--lambda_sparse', type=float, default=0.02)
     parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
+    parser.add_argument('--num_causal_vars', type=int, default=2)
 
-    # MYCODE
     datahandler = dh.DataHandling()
-    # model_args = {'data_dir': '../data/pinball/',
-    #               'causal_encoder_checkpoint': '../data/pinball/models/CausalEncoder.ckpt',
-    #               'cluster': False,
-    #               'seed': 42,
-    #               'max_epochs': 200,
-    #               'debug': False,
-    #               'offline': False,
-    #               'batch_size': 100,
-    #               'num_workers': 4,
-    #               'exclude_vars': None,
-    #               'exclude_objects': None,
-    #               'coarse_vars': False,
-    #               'data_img_width': 64,
-    #               'seq_len': 2,
-    #               'lr': 0.001,
-    #               'warmup': 100,
-    #               'imperfect_interventions': False,
-    #               'check_val_every_n_epoch': 2,
-    #               'logger_name': '',
-    #               'files_to_save': '',
-    #               'model': 'iCITRISVAE',
-    #               'c_hid': 32,
-    #               'decoder_num_blocks': 1,
-    #               'act_fn': 'silu',
-    #               'num_latents': 16,
-    #               'classifier_lr': 0.004,
-    #               'classifier_momentum': 0.0,
-    #               'classifier_gumbel_temperature': 1.0,
-    #               'classifier_use_normalization': False,
-    #               'classifier_use_conditional_targets': False,
-    #               'kld_warmup': 0,
-    #               'beta_t1': 1.0,
-    #               'gamma': 1.0,
-    #               'lambda_reg': 0.0,
-    #               'autoregressive_prior': False,
-    #               'beta_classifier': 2.0,
-    #               'beta_mi_estimator': 2.0,
-    #               'lambda_sparse': 0.02,
-    #               'mi_estimator_comparisons': 1,
-    #               'graph_learning_method': 'ENCO'}
+
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    batch_size = 100
+    batch_size_causal = 500
+    citris = iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
+                        num_causal_vars=args_citris.num_causal_vars)
     DataClass = ReacherDataset
     pl.seed_everything(42)
+    # END MYCODE
 
     if args.track:
         import wandb
@@ -269,7 +238,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     # print(("cuda" if torch.cuda.is_available() and args.cuda else "cpu"))
 
     # env setup
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
+    envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video,
+                                              run_name, model=citris, batch_size=batch_size_causal)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     max_action = float(envs.single_action_space.high[0])
@@ -310,6 +280,9 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            # MYCODE
+            # Simple action masking
+            actions = utils.mask_actions(actions, False)
         else:
             actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
             actions = actions.detach().cpu().numpy()
@@ -317,10 +290,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
-        # TODO: Update VAE
         # MYCODE
-        if (global_step+1) % 100 == 0:
+        # Update VAE to better disentangle causal representation
+        if (global_step+1) % batch_size_causal == 0:
             datasets, data_loaders, data_name = utils.load_datasets(args_citris, 'Reacher')
+
             model_args['num_causal_vars'] = datasets['train'].num_vars()
             utils.train_model(model_class=iCITRISVAE, train_loader=data_loaders['train'], **model_args)
 

@@ -13,10 +13,10 @@ from tqdm.auto import tqdm
 import pathlib
 
 
-class ReacherDataset(data.Dataset):
+class BaseDataset(data.Dataset):
     """
-    Load the data for the VAE to train on
-    """
+        Load the data for the VAE to train on
+        """
 
     # In PinballDataset, they provide numbers indicating maximum value after the ordereddict, should i do this?
 
@@ -37,7 +37,6 @@ class ReacherDataset(data.Dataset):
         super().__init__()
         image_path = data_folder + 'images.npz'
         target_path = data_folder + 'intervention.npz'
-        # test_im = np.load(image_path)['entries']
         self.imgs = torch.from_numpy(np.load(image_path)['entries'])
         self.targets = torch.from_numpy(np.load(target_path)['entries'])
 
@@ -77,7 +76,7 @@ class ReacherDataset(data.Dataset):
         encoder.to(device)
         encodings = None
         for idx in tqdm(range(0, self.imgs.shape[0], batch_size), desc='Encoding dataset...', leave=False):
-            batch = self.imgs[idx:idx+batch_size].to(device)
+            batch = self.imgs[idx:idx + batch_size].to(device)
             batch = self._prepare_imgs(batch)
             if len(batch.shape) == 5:
                 batch = batch.flatten(0, 1)
@@ -87,7 +86,7 @@ class ReacherDataset(data.Dataset):
             batch = batch.detach().cpu()
             if encodings is None:
                 encodings = torch.zeros(self.imgs.shape[:-3] + batch.shape[-1:], dtype=batch.dtype, device='cpu')
-            encodings[idx:idx+batch_size] = batch
+            encodings[idx:idx + batch_size] = batch
         self.imgs = encodings
         self.encodings_active = True
         return encodings
@@ -123,8 +122,8 @@ class ReacherDataset(data.Dataset):
     def __getitem__(self, idx):
         returns = []
 
-        img_pair = self.imgs[idx:idx+self.seq_len]
-        target = self.targets[idx:idx+self.seq_len-1]
+        img_pair = self.imgs[idx:idx + self.seq_len]
+        target = self.targets[idx:idx + self.seq_len - 1]
 
         if self.single_image:
             img_pair = img_pair[0]
@@ -137,8 +136,31 @@ class ReacherDataset(data.Dataset):
         return tuple(returns) if len(returns) > 1 else returns[0]
 
 
-# test = ReacherDataset
-# test_data = test(data_folder=str(pathlib.Path(__file__).parent.resolve()) + '/data/')
-# print(test_data)
-# test_loader = data.DataLoader(test_data, batch_size=100, shuffle=False, pin_memory=True, drop_last=False, num_workers=4)
-# print(f'Training dataset size: {len(test_data)} / {len(test_loader)}')
+class ReacherDataset(BaseDataset):
+    VAR_INFO = OrderedDict({
+        'base_x': 'continuous',
+        'base_y': 'continuous',
+        'base_vel_x': 'continuous',
+        'base_vel_y': 'continuous',
+        'tip_x': 'continuous',
+        'tip_y': 'continuous',
+        'tip_vel_x': 'continuous',
+        'tip_vel_y': 'continuous'
+    })
+
+    CAUSAL_VAR_NAMES = ['base', 'root']
+
+
+class HalfCheetahDataset(BaseDataset):
+    VAR_INFO = OrderedDict({
+        'base_x': 'continuous',
+        'base_y': 'continuous',
+        'base_vel_x': 'continuous',
+        'base_vel_y': 'continuous',
+        'tip_x': 'continuous',
+        'tip_y': 'continuous',
+        'tip_vel_x': 'continuous',
+        'tip_vel_y': 'continuous'
+    })
+
+    CAUSAL_VAR_NAMES = ['base', 'root']

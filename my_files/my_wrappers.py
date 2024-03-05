@@ -7,7 +7,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import cv2
-import pathlib
+import torch
 
 import cleanrl.my_files.datahandling as dh
 
@@ -31,13 +31,15 @@ class PixelWrapper(gym.ObservationWrapper):
     def __init__(
         self,
         env: gym.Env,
+        model,
         shape: Union[tuple, int],
         pixels_only: bool = True,
         render_kwargs: Optional[Dict[str, Dict[str, Any]]] = None,
         pixel_keys: Tuple[str, ...] = ("pixels",),
         rgb: bool = False,
         keep_dim: bool = False,
-        batch_size: int = 200
+        batch_size: int = 200,
+        causal: bool = True
     ):
         """Initializes a new pixel Wrapper.
 
@@ -76,7 +78,7 @@ class PixelWrapper(gym.ObservationWrapper):
         # Updating the VAE
         self.iter = 0
         self.batch_size = batch_size
-
+        self.citris = model
         # Data handling
         self.datahandling = dh.DataHandling()
         # END MYCODE
@@ -152,25 +154,24 @@ class PixelWrapper(gym.ObservationWrapper):
             else:
                 raise TypeError(pixels.dtype)
 
-            pixels_space = spaces.Box(
-                shape=pixels.shape, low=low, high=high, dtype=pixels.dtype
-            )
-
             # START MYCODE
             # Convert observation to grayscale and resize
-            if self.rgb:
-                pixels_space = pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 3),
-                                                         low=low, high=high, dtype=pixels.dtype)
+            if causal:
+                pixels_space = spaces.Box(shape=(self.citris.hparams.num_latents, self.citris.hparams.num_causal_vars),
+                                          low=-float("inf"), high=float("inf"), dtype=np.float32)
             else:
-                if self.keep_dim:
-                    pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 1),
+                if self.rgb:
+                    pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 3),
                                               low=low, high=high, dtype=pixels.dtype)
                 else:
-                    pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1]), low=low,
-                                              high=high, dtype=pixels.dtype)
-            # END MYCODE
-
+                    if self.keep_dim:
+                        pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 1),
+                                                  low=low, high=high, dtype=pixels.dtype)
+                    else:
+                        pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1]), low=low,
+                                                  high=high, dtype=pixels.dtype)
             pixels_spaces[pixel_key] = pixels_space
+            # END MYCODE
 
         self.observation_space.spaces.update(pixels_spaces)
 
@@ -198,13 +199,17 @@ class PixelWrapper(gym.ObservationWrapper):
             if observation.ndim == 2:
                 pixel_observation[key] = np.expand_dims(pixel_observation[key], -1)
 
-        # cv2.imshow('test', pixel_observation['pixels'])
-        # cv2.waitKey(0)
-        self.datahandling.update_npz_file(data=pixel_observation['pixels'], batch_size=self.batch_size)
+        _ = self.datahandling.update_npz_file(data=pixel_observation['pixels'], batch_size=self.batch_size)
+        path = self.datahandling.update_npz_file(data=pixel_observation['pixels'], filename='current', batch_size=1)
 
+        img = torch.from_numpy(np.load(path)['entries']).float()
+        img = img.permute(0, 3, 1, 2)
+
+        # Obtain the latent to causal assignment
+        causal_vars = self.citris.get_causal_rep(img).detach().numpy()
+        causal_rep = {'pixels': causal_vars}
+        return causal_rep
         # END MYCODE
-
-        return pixel_observation
 
     def _add_pixel_observation(self, wrapped_observation):
         if self._pixels_only:
@@ -268,6 +273,17 @@ class ActionWrapper(gym.ActionWrapper):
         :param action: The original :meth:`step` actions:
         :returns: The modified actions
         """
-        self.dh.update_npz_file(action, 'intervention', batch_size=self.batch_size)
+        # Intervention has taken place if the action value is larger than 0
+        interventions = (action == 0).astype(int)
+        _ = self.dh.update_npz_file(interventions, 'intervention', batch_size=self.batch_size)
         return action
+
+
+class RewardWrapper(gym.RewardWrapper):
+    def __init__(self, env, func):
+        super().__init__(env)
+        self.func = func
+
+    def reward(self, reward):
+        return self.func(reward)
 
