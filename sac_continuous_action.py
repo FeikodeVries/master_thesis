@@ -13,12 +13,9 @@ import torch.optim as optim
 import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
-import pathlib
-import torch.utils.data as data
 import pytorch_lightning as pl
-from torch.distributions.categorical import Categorical
-from my_files.datahandling import load_datasets
 
+from my_files.datahandling import load_datasets
 import my_files.datahandling as dh
 from my_files.active_icitris import active_iCITRISVAE
 from my_files import custom_env_wrappers as mywrapper
@@ -201,7 +198,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    batch_size_causal = 100
+    batch_size_causal = 500
     citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
                         num_causal_vars=args_citris.num_causal_vars)
     DataClass = ReacherDataset

@@ -8,8 +8,11 @@ import gymnasium as gym
 from gymnasium import spaces
 import cv2
 import torch
+import pathlib
+import os
 
 import cleanrl.my_files.datahandling as dh
+from cleanrl.my_files.active_icitris import active_iCITRISVAE
 
 STATE_KEY = "state"
 
@@ -205,6 +208,11 @@ class CausalWrapper(gym.ObservationWrapper):
         img = torch.from_numpy(np.load(path)['entries']).float()
         img = img.permute(0, 3, 1, 2)
 
+        # Use pretrained model
+        root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
+        pretrained_filename = root_dir + 'last.ckpt'
+        if os.path.isfile(pretrained_filename):
+            self.citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
         # Obtain the latent to causal assignment
         causal_vars = self.citris.get_causal_rep(img).detach().numpy()
         causal_rep = {'pixels': causal_vars}
