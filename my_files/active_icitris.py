@@ -46,7 +46,7 @@ class active_iCITRISVAE(pl.LightningModule):
         lr : float
              Learning rate to use for training
         num_causal_vars : int
-                          Number of causal variables / size of intervention target vector
+                          Number of causal variables
         warmup : int
                  Number of learning rate warmup steps
         max_iters : int
@@ -127,11 +127,11 @@ class active_iCITRISVAE(pl.LightningModule):
             use_normalization=True,
             use_conditional_targets=True)
         self.mi_estimator = causal.MIEstimator(num_latents=self.hparams.num_latents,
-                                              num_blocks=self.hparams.num_causal_vars,
-                                              c_hid=self.hparams.c_hid,
-                                              var_names=self.hparams.var_names,
-                                              momentum_model=0.9,
-                                              gumbel_temperature=1.0)
+                                               num_blocks=self.hparams.num_causal_vars,
+                                               c_hid=self.hparams.c_hid,
+                                               var_names=self.hparams.var_names,
+                                               momentum_model=0.9,
+                                               gumbel_temperature=1.0)
         if self.hparams.use_flow_prior:
             self.flow = flow.AutoregNormalizingFlow(self.hparams.num_latents,
                                                num_flows=4,
@@ -242,7 +242,6 @@ class active_iCITRISVAE(pl.LightningModule):
                                                   target=target,
                                                   transition_prior=self.prior)
         loss = loss + loss_model + loss_z * self.hparams.beta_classifier
-
         # Mutual information estimator
         scheduler_factor = self.mi_scheduler.get_factor(self.global_step)
         loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
@@ -252,10 +251,12 @@ class active_iCITRISVAE(pl.LightningModule):
                                                      instant_prob=scheduler_factor)
 
         loss = loss + loss_model_mi + loss_z_mi * self.hparams.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
+        print(f"MIE CLASSIFIER loss {loss}")
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
-        loss = loss + 0.1 * loss_z_reg
 
+        loss = loss + 0.1 * loss_z_reg
+        print(f"Stabilisied loss {loss}")
         return loss
 
     def training_step(self, batch, batch_idx):

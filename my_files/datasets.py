@@ -37,8 +37,8 @@ class BaseDataset(data.Dataset):
         super().__init__()
         image_path = data_folder + 'images.npz'
         target_path = data_folder + 'intervention.npz'
-        self.imgs = torch.from_numpy(np.load(image_path)['entries'])
-        self.targets = torch.from_numpy(np.load(target_path)['entries'])
+        self.imgs = torch.from_numpy(np.load(image_path)['entries']).float()
+        self.targets = torch.from_numpy(np.load(target_path)['entries']).float()
 
         self._clean_up_data()
         self.split_name = split
@@ -57,7 +57,6 @@ class BaseDataset(data.Dataset):
             self.imgs = self.imgs.permute(0, 1, 4, 2, 3)  # Push channels to PyTorch dimension
         else:
             self.imgs = self.imgs.permute(0, 3, 1, 2)
-
         self.target_names = ReacherDataset.CAUSAL_VAR_NAMES
         # print(f'Using the causal variables {self.target_names}')
 

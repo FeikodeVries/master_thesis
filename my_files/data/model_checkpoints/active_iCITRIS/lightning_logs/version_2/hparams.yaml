@@ -1,6 +1,6 @@
 act_fn: silu
 autoregressive_prior: false
-batch_size: 20
+batch_size: 100
 beta_classifier: 2.0
 beta_mi_estimator: 2.0
 beta_t1: 1.0

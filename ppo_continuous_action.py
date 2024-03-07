@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
 
+from my_files.datahandling import load_datasets
 import my_files.datahandling as dh
 from my_files.active_icitris import active_iCITRISVAE
 from my_files import custom_env_wrappers as mywrapper
@@ -102,9 +103,11 @@ def make_env(env_id, idx, capture_video, run_name, gamma, model, batch_size=100)
             env = gym.make(env_id, render_mode="rgb_array")
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = mywrapper.CausalWrapper(env, shape=64, rgb=True, batch_size=batch_size, model=model)
+
+        env = mywrapper.CausalWrapper(env, shape=64, rgb=True, batch_size=batch_size, model=model, causal=True)
         env = gym.wrappers.FlattenObservation(env)
 
+        env = mywrapper.ActionWrapper(env, batch_size=batch_size, causal=True)
         env = gym.wrappers.ClipAction(env)
 
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -198,15 +201,17 @@ if __name__ == "__main__":
     parser.add_argument('--lambda_sparse', type=float, default=0.02)
     parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
+    parser.add_argument('--num_causal_vars', type=int, default=2)
 
     datahandler = dh.DataHandling()
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    batch_size_causal = 1000
+    batch_size_causal = 2000
     citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                        num_causal_vars=2)
+                               num_causal_vars=args_citris.num_causal_vars)
     DataClass = ReacherDataset
+    pl.seed_everything(42)
     # END MYCODE
 
     # TRY NOT TO MODIFY: seeding
@@ -222,7 +227,8 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, model=citris, batch_size=args.num_steps) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, model=citris,
+                  batch_size=batch_size_causal) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -250,20 +256,16 @@ if __name__ == "__main__":
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
-
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
-
+            print(global_step)
             # ALGO LOGIC: action logic
             with torch.no_grad():
                 action, logprob, _, value = agent.get_action_and_value(next_obs)
                 values[step] = value.flatten()
             actions[step] = action
-
-            #print(actions[step])
-
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
@@ -278,6 +280,16 @@ if __name__ == "__main__":
                         print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+
+            # MYCODE
+            # Update VAE to better disentangle causal representation
+            if (global_step) % batch_size_causal == 0:
+                datasets, data_loaders, data_name = load_datasets(args_citris, 'Reacher')
+
+                model_args['num_causal_vars'] = datasets['train'].num_vars()
+                utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'],
+                                  **model_args)
+            # END MYCODE
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -372,12 +384,6 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-
-        # # MYCODE
-        # datasets, data_loaders, data_name = utils.load_datasets(args_citris, 'Reacher')
-        #
-        # model_args['num_causal_vars'] = datasets['train'].num_vars()
-        # utils.train_model(model_class=iCITRISVAE, train_loader=data_loaders['train'], **model_args)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

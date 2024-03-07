@@ -47,7 +47,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Reacher-v4"
     """the environment id of the task"""
-    total_timesteps: int = 10000
+    total_timesteps: int = 20000
     """total timesteps of the experiments"""
     buffer_size: int = int(100)
     """the replay memory buffer size"""
@@ -57,7 +57,7 @@ class Args:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = 1000
+    learning_starts: int = 10000
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -85,10 +85,10 @@ def make_env(env_id, seed, idx, capture_video, run_name, model, batch_size=100):
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.CausalWrapper(env, shape=64, batch_size=batch_size, rgb=True, model=model)
+        env = mywrapper.CausalWrapper(env, shape=64, batch_size=batch_size, rgb=True, model=model, causal=True)
         env = gym.wrappers.FlattenObservation(env)
 
-        env = mywrapper.ActionWrapper(env, batch_size=batch_size)
+        env = mywrapper.ActionWrapper(env, batch_size=batch_size, causal=True)
 
         env.action_space.seed(seed)
         return env
@@ -200,7 +200,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     model_args = vars(args_citris)
     batch_size_causal = 500
     citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                        num_causal_vars=args_citris.num_causal_vars)
+                               num_causal_vars=args_citris.num_causal_vars)
     DataClass = ReacherDataset
     pl.seed_everything(42)
     # END MYCODE
@@ -278,24 +278,14 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step < args.learning_starts:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
             # MYCODE
-            # Simple action masking
             actions = utils.mask_actions(actions, False)
         else:
             actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
             actions = actions.detach().cpu().numpy()
+            # Simple action masking
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-
-        # MYCODE
-        # Update VAE to better disentangle causal representation
-        if (global_step+1) % batch_size_causal == 0:
-            datasets, data_loaders, data_name = load_datasets(args_citris, 'Reacher')
-
-            model_args['num_causal_vars'] = datasets['train'].num_vars()
-            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
-
-        # END MYCODE
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -314,6 +304,15 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         obs = next_obs
+
+        # MYCODE
+        # Update VAE to better disentangle causal representation
+        if global_step == batch_size_causal:
+            datasets, data_loaders, data_name = load_datasets(args_citris, 'Reacher')
+
+            model_args['num_causal_vars'] = datasets['train'].num_vars()
+            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+        # END MYCODE
 
         # ALGO LOGIC: training.
         if global_step > args.learning_starts:

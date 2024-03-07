@@ -1,6 +1,6 @@
 act_fn: silu
 autoregressive_prior: false
-batch_size: 20
+batch_size: 100
 beta_classifier: 2.0
 beta_mi_estimator: 2.0
 beta_t1: 1.0
@@ -31,7 +31,7 @@ logger_name: ''
 lr: 0.001
 max_iters: 100000
 mi_estimator_comparisons: 1
-model: iCITRISVAE
+model: active_iCITRISVAE
 no_encoder_decoder: false
 num_causal_vars: 2
 num_graph_samples: 8

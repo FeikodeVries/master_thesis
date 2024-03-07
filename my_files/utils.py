@@ -294,6 +294,7 @@ class InstantaneousPrior(nn.Module):
 
         # Target preparation
         if len(target.shape) == 1:
+            print(target)
             target_oh = F.one_hot(target, num_classes=self.num_blocks)
         else:
             target_oh = target
@@ -571,7 +572,7 @@ def get_default_parser():
     parser.add_argument('--max_epochs', type=int, default=10)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
-    parser.add_argument('--batch_size', type=int, default=20)
+    parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--exclude_vars', type=str, nargs='+', default=None)
     parser.add_argument('--exclude_objects', type=int, nargs='+', default=None)

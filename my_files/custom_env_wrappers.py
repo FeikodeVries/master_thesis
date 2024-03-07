@@ -79,11 +79,13 @@ class CausalWrapper(gym.ObservationWrapper):
         self.rgb = rgb
 
         # Updating the VAE
-        self.iter = 0
         self.batch_size = batch_size
         self.citris = model
+        self.t = 0
+        self.causal = causal
         # Data handling
         self.datahandling = dh.DataHandling()
+        self.observations = []
         # END MYCODE
 
         # Avoid side-effects that occur when render_kwargs is manipulated
@@ -159,7 +161,7 @@ class CausalWrapper(gym.ObservationWrapper):
 
             # START MYCODE
             # Convert observation to grayscale and resize
-            if causal:
+            if self.causal:
                 pixels_space = spaces.Box(shape=(self.citris.hparams.num_latents, self.citris.hparams.num_causal_vars),
                                           low=-float("inf"), high=float("inf"), dtype=np.float32)
             else:
@@ -202,21 +204,35 @@ class CausalWrapper(gym.ObservationWrapper):
             if observation.ndim == 2:
                 pixel_observation[key] = np.expand_dims(pixel_observation[key], -1)
 
-        _ = self.datahandling.update_npz_file(data=pixel_observation['pixels'], batch_size=self.batch_size)
-        path = self.datahandling.update_npz_file(data=pixel_observation['pixels'], filename='current', batch_size=1)
+        if self.causal:
+            if self.t < self.batch_size:
+                if len(self.observations) == 0:
+                    self.observations = np.array([pixel_observation['pixels']])
+                else:
+                    self.observations = np.concatenate((self.observations,
+                                                        np.array([pixel_observation['pixels']])), axis=0)
+            elif self.batch_size == self.t:
+                self.datahandling.batch_update_npz(self.observations)
+                self.observations = []
+                # Use pretrained model
+                root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
+                pretrained_filename = root_dir + 'last.ckpt'
+                # Update stored model with new model
+                if os.path.isfile(pretrained_filename):
+                    self.citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
+                self.t = 0
 
-        img = torch.from_numpy(np.load(path)['entries']).float()
-        img = img.permute(0, 3, 1, 2)
+            # Obtain the latent to causal assignment
+            obs = np.array([pixel_observation['pixels']])
+            img = torch.from_numpy(np.array(obs)).float()
+            img = img.permute(0, 3, 1, 2)
 
-        # Use pretrained model
-        root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
-        pretrained_filename = root_dir + 'last.ckpt'
-        if os.path.isfile(pretrained_filename):
-            self.citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
-        # Obtain the latent to causal assignment
-        causal_vars = self.citris.get_causal_rep(img).detach().numpy()
-        causal_rep = {'pixels': causal_vars}
-        return causal_rep
+            causal_vars = self.citris.get_causal_rep(img).detach().numpy()
+            causal_rep = {'pixels': causal_vars}
+            self.t += 1
+            return causal_rep
+        else:
+            return pixel_observation
         # END MYCODE
 
     def _add_pixel_observation(self, wrapped_observation):
@@ -251,6 +267,17 @@ class CausalWrapper(gym.ObservationWrapper):
             self.render_history += render
         return render
 
+    def step(self, action):
+        """Steps through the environment, incrementing the time step.
+
+        Args:
+            action: The action to take
+
+        Returns:
+            The environment's step using the action.
+        """
+        return super().step(action)
+
 
 class ActionWrapper(gym.ActionWrapper):
     """Superclass of wrappers that can modify the action before :meth:`env.step`.
@@ -265,11 +292,14 @@ class ActionWrapper(gym.ActionWrapper):
     Among others, Gymnasium provides the action wrappers :class:`ClipAction` and :class:`RescaleAction` for clipping and rescaling actions.
     """
 
-    def __init__(self, env, batch_size):
+    def __init__(self, env, batch_size, causal):
         """Constructor for the action wrapper."""
         super().__init__(env)
         self.dh = dh.DataHandling()
         self.batch_size = batch_size
+        self.t = 0
+        self.actions = []
+        self.causal = causal
 
     def step(self, action) :
         """Runs the :attr:`env` :meth:`env.step` using the modified ``action`` from :meth:`self.action`."""
@@ -281,9 +311,17 @@ class ActionWrapper(gym.ActionWrapper):
         :param action: The original :meth:`step` actions:
         :returns: The modified actions
         """
-        # Intervention has taken place if the action value is larger than 0
-        interventions = (action == 0).astype(int)
-        _ = self.dh.update_npz_file(interventions, 'intervention', batch_size=self.batch_size)
+        if self.causal:
+            if self.t < self.batch_size:
+                if len(self.actions) == 0:
+                    self.actions = np.array(np.array([action]))
+                else:
+                    self.actions = np.concatenate((self.actions, np.array([action])), axis=0)
+            elif self.batch_size == self.t:
+                self.dh.batch_update_npz(self.actions, filename='intervention')
+                self.actions = []
+                self.t = 0
+            self.t += 1
         return action
 
 

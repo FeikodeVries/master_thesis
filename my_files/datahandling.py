@@ -40,6 +40,11 @@ class DataHandling:
 
         return filepath
 
+    def batch_update_npz(self, data, filename: str = 'images'):
+        filepath = self.path + (filename + '.npz')
+        np.savez_compressed(filepath, entries=data)
+        return filepath
+
 
 def load_datasets(args, env_name):
     pl.seed_everything(args.seed)
@@ -59,20 +64,19 @@ def load_datasets(args, env_name):
     folder = str(pathlib.Path(__file__).parent.resolve()) + '/data/'
 
     train_data = DataClass(data_folder=folder, split='train', single_image=False, seq_len=2, **dataset_args)
-    val_data = DataClass(data_folder=folder, split='val_indep', single_image=True, **dataset_args, **test_args(train_data))
+    # val_data = DataClass(data_folder=folder, split='val_indep', single_image=True, **dataset_args, **test_args(train_data))
     train_loader = data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
                                    pin_memory=True, drop_last=True, num_workers=args.num_workers)
 
     print(f'Training dataset size: {len(train_data)} / {len(train_loader)}')
-    print(f'Val correlation dataset size: {len(val_data)}')
 
     datasets = {
         'train': train_data,
-        'val': val_data
     }
     data_loaders = {
         'train': train_loader
     }
+
     return datasets, data_loaders, env_name.lower()
 
 
