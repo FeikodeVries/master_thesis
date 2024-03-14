@@ -294,7 +294,6 @@ class InstantaneousPrior(nn.Module):
 
         # Target preparation
         if len(target.shape) == 1:
-            print(target)
             target_oh = F.one_hot(target, num_classes=self.num_blocks)
         else:
             target_oh = target
@@ -544,13 +543,12 @@ def train_model(model_class, train_loader, max_epochs=200, check_val_every_n_epo
     trainer_args['enable_progress_bar'] = False
     trainer_args['log_every_n_steps'] = 2
     root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
+    log_dir = str(pathlib.Path(__file__).parent.resolve().parents[0]) + f'/runs/'
     checkpoint_callback = ModelCheckpoint(dirpath=root_dir, save_last=True)
-
-    trainer = pl.Trainer(default_root_dir=root_dir, callbacks=[checkpoint_callback], accelerator='auto', max_epochs=max_epochs,
-                         check_val_every_n_epoch=1, gradient_clip_val=gradient_clip_val,
+    trainer = pl.Trainer(default_root_dir=log_dir, callbacks=[checkpoint_callback], accelerator='auto',
+                         max_epochs=max_epochs, check_val_every_n_epoch=1, gradient_clip_val=gradient_clip_val,
                          **trainer_args)
     trainer.logger._default_hp_metric = None
-
     pretrained_filename = root_dir + 'last.ckpt'
     pl.seed_everything(seed)
     if load_pretrained and os.path.isfile(pretrained_filename):
@@ -569,10 +567,10 @@ def get_default_parser():
                         default="../data/model_checkpoints/active_iCITRIS/CausalEncoder.ckpt")
     parser.add_argument('--cluster', action="store_true")
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--max_epochs', type=int, default=10)
+    parser.add_argument('--max_epochs', type=int, default=20)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
-    parser.add_argument('--batch_size', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--exclude_vars', type=str, nargs='+', default=None)
     parser.add_argument('--exclude_objects', type=int, nargs='+', default=None)
@@ -617,12 +615,14 @@ def gaussian_log_prob(mean, log_std, samples):
     return - log_std - 0.5 * np.log(2*np.pi) - 0.5 * ((samples - mean) / log_std.exp())**2
 
 
-def mask_actions(actions, learning=bool):
-    # Randomly mask actions
-    mask = np.random.choice([0, 1], actions.shape)
-    if learning:
+def mask_actions(actions, current_step, training_size):
+    # Decrease probability of masking out over training
+    prob = np.clip(1 - (current_step / (current_step + training_size)), 0.01, 0.5)
+    # Mask actions
+    mask = np.random.choice([0, 1], actions.shape, p=[prob, 1-prob])
+    if isinstance(actions, np.ndarray):
+        return np.multiply(actions, mask)
+    else:
         mask = torch.from_numpy(mask).to(device="cuda:0")
         actions = actions * mask
         return actions
-    else:
-        return np.multiply(actions, mask)

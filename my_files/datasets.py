@@ -37,8 +37,8 @@ class BaseDataset(data.Dataset):
         super().__init__()
         image_path = data_folder + 'images.npz'
         target_path = data_folder + 'intervention.npz'
-        self.imgs = torch.from_numpy(np.load(image_path)['entries']).float()
-        self.targets = torch.from_numpy(np.load(target_path)['entries']).float()
+        self.imgs = torch.from_numpy(np.load(image_path)['entries'])
+        self.targets = torch.from_numpy(np.load(target_path)['entries'])
 
         self._clean_up_data()
         self.split_name = split
@@ -175,12 +175,8 @@ class WalkerDataset(BaseDataset):
         'left_upper_leg_x': 'continuous',
         'left_upper_leg_y': 'continuous',
         'left_upper_leg_vel_x': 'continuous',
-        'left_upper_leg_vel_y': 'continuous',
-        'torso_x': 'continuous',
-        'torso_y': 'continuous',
-        'torso_vel_x': 'continuous',
-        'torso_vel_y': 'continuous'
+        'left_upper_leg_vel_y': 'continuous'
     })
 
-    CAUSAL_VAR_NAMES = ['torso', 'right_upper_leg', 'right_lower_leg', 'right_foot',
+    CAUSAL_VAR_NAMES = ['right_upper_leg', 'right_lower_leg', 'right_foot',
                         'left_upper_leg', 'left_lower_leg', 'left_foot']

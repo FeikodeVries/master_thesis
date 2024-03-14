@@ -12,7 +12,7 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-
+import pathlib
 from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
 
@@ -42,17 +42,19 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
+    load_model: bool = False
+    """whether to load a model to continue training"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "HalfCheetah-v4"
+    env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 10000
+    total_timesteps: int = 3000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -145,13 +147,14 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, x, current_step, training_size, action=None):
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
+        action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
@@ -160,7 +163,8 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}"
+
     if args.track:
         import wandb
 
@@ -185,7 +189,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_hid', type=int, default=32)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=12)
+    parser.add_argument('--num_latents', type=int, default=32)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -201,16 +205,27 @@ if __name__ == "__main__":
     parser.add_argument('--lambda_sparse', type=float, default=0.02)
     parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
-    parser.add_argument('--num_causal_vars', type=int, default=2)
+
+    parser.add_argument('--num_causal_vars', type=int, default=6)
+    parser.add_argument('--resume_training', type=bool, default=False)
 
     datahandler = dh.DataHandling()
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    batch_size_causal = 2000
-    citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                               num_causal_vars=args_citris.num_causal_vars)
-    DataClass = ReacherDataset
+
+    if args_citris.resume_training:
+        root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
+        pretrained_filename = root_dir + 'last.ckpt'
+        # Update stored model with new model
+        if os.path.isfile(pretrained_filename):
+            print('Retrieving causal representation...')
+            citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
+        else:
+            print('Causal representation not found')
+    else:
+        citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
+                                   num_causal_vars=args_citris.num_causal_vars, run_name=run_name)
     pl.seed_everything(42)
     # END MYCODE
 
@@ -223,16 +238,23 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # Test if GPU is found and used
-    print(("cuda" if torch.cuda.is_available() and args.cuda else "cpu"))
+    # print(("cuda" if torch.cuda.is_available() and args.cuda else "cpu"))
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, model=citris,
-                  batch_size=batch_size_causal) for i in range(args.num_envs)]
+                  batch_size=args.num_steps) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
+    if args.load_model:
+        path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/ppo_continuous_action.cleanrl_model'
+        if os.path.isfile(path):
+            print("Loading pretrained RL model")
+            agent.load_state_dict(torch.load(path))
+        else:
+            print("Pretrained RL model not found")
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -260,10 +282,10 @@ if __name__ == "__main__":
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
-            print(global_step)
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                                                                       training_size=args.total_timesteps)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -281,16 +303,6 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
-            # MYCODE
-            # Update VAE to better disentangle causal representation
-            if (global_step) % batch_size_causal == 0:
-                datasets, data_loaders, data_name = load_datasets(args_citris, 'Reacher')
-
-                model_args['num_causal_vars'] = datasets['train'].num_vars()
-                utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'],
-                                  **model_args)
-            # END MYCODE
-
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -306,6 +318,15 @@ if __name__ == "__main__":
                 delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
+
+        # MYCODE
+        # Update VAE to better disentangle causal representation
+        datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
+
+        model_args['run_name'] = run_name
+        model_args['num_causal_vars'] = datasets['train'].num_vars()
+        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+        # END MYCODE
 
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
@@ -324,7 +345,10 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
+                                                                              current_step=global_step,
+                                                                              training_size=args.total_timesteps,
+                                                                              action=b_actions[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -389,27 +413,6 @@ if __name__ == "__main__":
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.ppo_eval import evaluate
-
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=Agent,
-            device=device,
-            gamma=args.gamma,
-        )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
-
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "PPO", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     print(f"End of training, took: {(time.time() - start_time) / 60} minutes")
     envs.close()

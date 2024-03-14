@@ -207,10 +207,11 @@ class CausalWrapper(gym.ObservationWrapper):
         if self.causal:
             if self.t < self.batch_size:
                 if len(self.observations) == 0:
-                    self.observations = np.array([pixel_observation['pixels']])
+                    self.observations = np.array([pixel_observation['pixels']], dtype=np.float32)
                 else:
                     self.observations = np.concatenate((self.observations,
-                                                        np.array([pixel_observation['pixels']])), axis=0)
+                                                        np.array([pixel_observation['pixels']])), axis=0,
+                                                       dtype=np.float32)
             elif self.batch_size == self.t:
                 self.datahandling.batch_update_npz(self.observations)
                 self.observations = []
@@ -267,17 +268,6 @@ class CausalWrapper(gym.ObservationWrapper):
             self.render_history += render
         return render
 
-    def step(self, action):
-        """Steps through the environment, incrementing the time step.
-
-        Args:
-            action: The action to take
-
-        Returns:
-            The environment's step using the action.
-        """
-        return super().step(action)
-
 
 class ActionWrapper(gym.ActionWrapper):
     """Superclass of wrappers that can modify the action before :meth:`env.step`.
@@ -301,10 +291,6 @@ class ActionWrapper(gym.ActionWrapper):
         self.actions = []
         self.causal = causal
 
-    def step(self, action) :
-        """Runs the :attr:`env` :meth:`env.step` using the modified ``action`` from :meth:`self.action`."""
-        return self.env.step(self.action(action))
-
     def action(self, action):
         """
         Returns a modified action before :meth:`env.step` is called.
@@ -312,16 +298,18 @@ class ActionWrapper(gym.ActionWrapper):
         :returns: The modified actions
         """
         if self.causal:
+            self.t += 1
             if self.t < self.batch_size:
+                # Convert action to intervention
+                intervention = (np.absolute(action) > 0).astype(int)
                 if len(self.actions) == 0:
-                    self.actions = np.array(np.array([action]))
+                    self.actions = np.array(np.array([intervention], dtype=np.float32))
                 else:
-                    self.actions = np.concatenate((self.actions, np.array([action])), axis=0)
+                    self.actions = np.concatenate((self.actions, np.array([intervention])), axis=0, dtype=np.float32)
             elif self.batch_size == self.t:
                 self.dh.batch_update_npz(self.actions, filename='intervention')
                 self.actions = []
                 self.t = 0
-            self.t += 1
         return action
 
 

@@ -14,6 +14,7 @@ import tyro
 from stable_baselines3.common.buffers import ReplayBuffer
 from torch.utils.tensorboard import SummaryWriter
 import pytorch_lightning as pl
+import pathlib
 
 from my_files.datahandling import load_datasets
 import my_files.datahandling as dh
@@ -43,11 +44,14 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
+    save_model: bool = True
+    """whether to save model into the `runs/{run_name}` folder"""
+    load_model: bool = True
 
     # Algorithm specific arguments
-    env_id: str = "Reacher-v4"
+    env_id: str = "Walker2d-v4"
     """the environment id of the task"""
-    total_timesteps: int = 20000
+    total_timesteps: int = 10000
     """total timesteps of the experiments"""
     buffer_size: int = int(100)
     """the replay memory buffer size"""
@@ -57,7 +61,7 @@ class Args:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 256
     """the batch size of sample from the reply memory"""
-    learning_starts: int = 10000
+    learning_starts: int = 1000
     """timestep to start learning"""
     policy_lr: float = 3e-4
     """the learning rate of the policy network optimizer"""
@@ -141,7 +145,7 @@ class Actor(nn.Module):
 
         return mean, log_std
 
-    def get_action(self, x):
+    def get_action(self, x, current_step, training_size):
         mean, log_std = self(x)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
@@ -154,7 +158,7 @@ class Actor(nn.Module):
         log_prob = log_prob.sum(1, keepdim=True)
         mean = torch.tanh(mean) * self.action_scale + self.action_bias
         # Simple dropout action masking
-        action = utils.mask_actions(action, True)
+        action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
         return action, log_prob, mean
 
 
@@ -169,14 +173,14 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
     # MYCODE
     args = tyro.cli(Args)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}"
 
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=2)
+    parser.add_argument('--c_hid', type=int, default=32)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=12)
+    parser.add_argument('--num_latents', type=int, default=32)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -192,16 +196,26 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     parser.add_argument('--lambda_sparse', type=float, default=0.02)
     parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
-    parser.add_argument('--num_causal_vars', type=int, default=2)
+
+    parser.add_argument('--num_causal_vars', type=int, default=6)
+    parser.add_argument('--resume_training', type=bool, default=True)
 
     datahandler = dh.DataHandling()
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    batch_size_causal = 500
-    citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                               num_causal_vars=args_citris.num_causal_vars)
-    DataClass = ReacherDataset
+    if args_citris.resume_training:
+        root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
+        pretrained_filename = root_dir + 'last.ckpt'
+        # Update stored model with new model
+        if os.path.isfile(pretrained_filename):
+            print('Retrieving causal representation...')
+            citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
+        else:
+            print('Causal representation not found')
+    else:
+        citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
+                                   num_causal_vars=args_citris.num_causal_vars)
     pl.seed_everything(42)
     # END MYCODE
 
@@ -236,12 +250,20 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     # env setup
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video,
-                                              run_name, model=citris, batch_size=batch_size_causal)])
+                                              run_name, model=citris, batch_size=args.learning_starts)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     max_action = float(envs.single_action_space.high[0])
 
     actor = Actor(envs).to(device)
+    if args.load_model:
+        path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/sac_continuous_action.cleanrl_model'
+        if os.path.isfile(path):
+            print("Loading pretrained RL model")
+            actor.load_state_dict(torch.load(path))
+        else:
+            print("Pretrained RL model not found")
+
     qf1 = SoftQNetwork(envs).to(device)
     qf2 = SoftQNetwork(envs).to(device)
     qf1_target = SoftQNetwork(envs).to(device)
@@ -278,11 +300,12 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step < args.learning_starts:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
             # MYCODE
-            actions = utils.mask_actions(actions, False)
+            # Prob. based action masking
+            actions = utils.mask_actions(actions, current_step=global_step, training_size=args.total_timesteps)
         else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
+            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device), current_step=global_step,
+                                             training_size=args.total_timesteps)
             actions = actions.detach().cpu().numpy()
-            # Simple action masking
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
@@ -307,8 +330,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # MYCODE
         # Update VAE to better disentangle causal representation
-        if global_step == batch_size_causal:
-            datasets, data_loaders, data_name = load_datasets(args_citris, 'Reacher')
+        if (global_step + 1) % (args.learning_starts + 1) == 0:
+            datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
 
             model_args['num_causal_vars'] = datasets['train'].num_vars()
             utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
@@ -318,11 +341,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations)
+                next_state_actions, next_state_log_pi, _ = actor.get_action(data.next_observations, current_step=global_step,
+                                                                            training_size=args.total_timesteps)
                 qf1_next_target = qf1_target(data.next_observations, next_state_actions)
                 qf2_next_target = qf2_target(data.next_observations, next_state_actions)
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
+                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma \
+                               * (min_qf_next_target).view(-1)
 
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
             qf2_a_values = qf2(data.observations, data.actions).view(-1)
@@ -339,7 +364,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 for _ in range(
                     args.policy_frequency
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _ = actor.get_action(data.observations)
+                    pi, log_pi, _ = actor.get_action(data.observations, current_step=global_step,
+                                                     training_size=args.total_timesteps)
                     qf1_pi = qf1(data.observations, pi)
                     qf2_pi = qf2(data.observations, pi)
                     min_qf_pi = torch.min(qf1_pi, qf2_pi)
@@ -351,7 +377,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
                     if args.autotune:
                         with torch.no_grad():
-                            _, log_pi, _ = actor.get_action(data.observations)
+                            _, log_pi, _ = actor.get_action(data.observations, current_step=global_step,
+                                                     training_size=args.total_timesteps)
                         alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
 
                         a_optimizer.zero_grad()
@@ -378,6 +405,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                 if args.autotune:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
+
+    if args.save_model:
+        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        torch.save(actor.state_dict(), model_path)
+        print(f"model saved to {model_path}")
 
     print(f"End of training, took: {(time.time() - start_time) / 60} minutes")
 
