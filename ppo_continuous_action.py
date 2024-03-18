@@ -28,7 +28,7 @@ import my_files.utils as utils
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 1
+    seed: int = 3
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -54,7 +54,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 3000
+    total_timesteps: int = 1000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_hid', type=int, default=32)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=32)
+    parser.add_argument('--num_latents', type=int, default=12)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -225,8 +225,8 @@ if __name__ == "__main__":
             print('Causal representation not found')
     else:
         citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                                   num_causal_vars=args_citris.num_causal_vars, run_name=run_name)
-    pl.seed_everything(42)
+                                   num_causal_vars=args_citris.num_causal_vars, run_name=run_name, counter=0)
+    pl.seed_everything(args.seed)
     # END MYCODE
 
     # TRY NOT TO MODIFY: seeding
@@ -267,6 +267,7 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
+    citris_logging_counter = 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
@@ -325,7 +326,11 @@ if __name__ == "__main__":
 
         model_args['run_name'] = run_name
         model_args['num_causal_vars'] = datasets['train'].num_vars()
-        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+        model_args['counter'] = citris_logging_counter
+
+        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], seed=args.seed,
+                          **model_args)
+        citris_logging_counter += 1
         # END MYCODE
 
         # flatten the batch

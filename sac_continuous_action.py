@@ -198,7 +198,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
 
     parser.add_argument('--num_causal_vars', type=int, default=6)
-    parser.add_argument('--resume_training', type=bool, default=True)
+    parser.add_argument('--resume_training', type=bool, default=False)
 
     datahandler = dh.DataHandling()
 
@@ -215,8 +215,8 @@ poetry run pip install "stable_baselines3==2.0.0a1"
             print('Causal representation not found')
     else:
         citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                                   num_causal_vars=args_citris.num_causal_vars)
-    pl.seed_everything(42)
+                                   num_causal_vars=args_citris.num_causal_vars, run_name=run_name)
+    pl.seed_everything(args.seed)
     # END MYCODE
 
     if args.track:

@@ -400,8 +400,15 @@ class MIEstimator(nn.Module):
     The MI estimator for guiding towards better disentanglement of the causal variables in latent space.
     """
 
-    def __init__(self, num_latents, c_hid, num_blocks, momentum_model=0.0, var_names=None, num_layers=1,
-                 act_fn=lambda: nn.SiLU(), gumbel_temperature=1.0, use_normalization=True):
+    def __init__(self, num_latents,
+                 c_hid,
+                 num_blocks,
+                 momentum_model=0.0,
+                 var_names=None,
+                 num_layers=1,
+                 act_fn=lambda: nn.SiLU(),
+                 gumbel_temperature=1.0,
+                 use_normalization=True):
         """
         Parameters
         ----------
@@ -454,11 +461,11 @@ class MIEstimator(nn.Module):
 
         # Variable names for logging
         self.var_names = var_names
-        # if self.var_names is not None:
-        #     if len(self.var_names) <= num_blocks:
-        #         self.var_names = self.var_names + ['No variable']
-        #     if len(self.var_names) <= num_blocks + 1:
-        #         self.var_names = self.var_names + ['All variables']
+        if self.var_names is not None:
+            if len(self.var_names) <= num_blocks:
+                self.var_names = self.var_names + ['No variable']
+            if len(self.var_names) <= num_blocks + 1:
+                self.var_names = self.var_names + ['All variables']
 
     @torch.no_grad()
     def _step_exp_avg(self):
@@ -494,7 +501,6 @@ class MIEstimator(nn.Module):
         target = target.flatten(0, 1)
         z_sample_0 = z_sample[:, :-1].flatten(0, 1)
         z_sample_1 = z_sample[:, 1:].flatten(0, 1)
-
         # Find samples for which certain variables have been intervened upon
         with torch.no_grad():
             idxs = [torch.where(target[:, i] == 1)[0] for i in range(self.num_blocks)]
@@ -555,6 +561,17 @@ class MIEstimator(nn.Module):
         loss_z = loss_z.mean()
         reg_loss = 0.001 * (model_out ** 2).mean()  # To keep outputs in a reasonable range
         loss_model = loss_model + reg_loss
+
+        # # Logging
+        # if logger is not None:
+        #     with torch.no_grad():
+        #         acc = (z_out.argmax(dim=1) == 0).float()
+        #         for b in range(self.num_blocks):
+        #             num_elem = intv_target_onehot[:, b].sum().item()
+        #             if num_elem > 0:
+        #                 acc_b = (acc * intv_target_onehot[:, b]).sum() / num_elem
+        #                 logger.log(f'mi_estimator_accuracy_{self._tag_to_str(b)}', acc_b, on_step=False, on_epoch=True)
+        #         logger.log('mi_estimator_output_square', (model_out ** 2).mean(), on_step=False, on_epoch=True)
 
         return loss_model, loss_z
 

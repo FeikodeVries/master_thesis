@@ -46,7 +46,7 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = True
+    save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
     load_model: bool = False
     """whether to load a model to continue training"""
@@ -104,7 +104,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, model, batch_size=100)
     def thunk():
         if capture_video:
             env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"runs/videos/{run_name}", video_length=30)
+            env = gym.wrappers.RecordVideo(env, f"runs/videos/{run_name}", video_length=0)
         else:
             env = gym.make(env_id, render_mode="rgb_array")
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
@@ -238,7 +238,7 @@ if __name__ == "__main__":
     else:
         print('Causal representation not found')
 
-    pl.seed_everything(42)
+    pl.seed_everything(args.seed)
     # END MYCODE
 
     # TRY NOT TO MODIFY: seeding
@@ -270,17 +270,13 @@ if __name__ == "__main__":
 
     for global_step in range(args.total_timesteps):
         actions, _, _, _ = agent.get_action(torch.Tensor(obs).to(device))
-
         obs, reward, terminated, truncated, infos = envs.step(actions.cpu().numpy())
-        if terminated or truncated:
-            observation, infos = envs.reset()
 
         if "final_info" in infos:
             for info in infos["final_info"]:
-                if info and "episode" in info:
-                    print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                    writer.add_scalar("charts_test/episodic_return", info["episode"]["r"], global_step)
-                    writer.add_scalar("charts_test/episodic_length", info["episode"]["l"], global_step)
+                print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                writer.add_scalar("charts_test/episodic_return", info["episode"]["r"], global_step)
+                writer.add_scalar("charts_test/episodic_length", info["episode"]["l"], global_step)
 
     print(f"End of eval, took: {(time.time() - start_time) / 60} minutes")
     envs.close()

@@ -553,7 +553,7 @@ def train_model(model_class, train_loader, max_epochs=200, check_val_every_n_epo
     pl.seed_everything(seed)
     if load_pretrained and os.path.isfile(pretrained_filename):
         print('model found')
-        model = model_class.load_from_checkpoint(pretrained_filename)
+        model = model_class.load_from_checkpoint(pretrained_filename, **kwargs)
     else:
         model = model_class(**kwargs)
 
@@ -567,7 +567,7 @@ def get_default_parser():
                         default="../data/model_checkpoints/active_iCITRIS/CausalEncoder.ckpt")
     parser.add_argument('--cluster', action="store_true")
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--max_epochs', type=int, default=10)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--batch_size', type=int, default=512)
@@ -617,7 +617,7 @@ def gaussian_log_prob(mean, log_std, samples):
 
 def mask_actions(actions, current_step, training_size):
     # Decrease probability of masking out over training
-    prob = np.clip(1 - (current_step / (current_step + training_size)), 0.01, 0.5)
+    prob = np.clip(1 - (current_step / (current_step + training_size)), 0.1, 0.5)
     # Mask actions
     mask = np.random.choice([0, 1], actions.shape, p=[prob, 1-prob])
     if isinstance(actions, np.ndarray):

@@ -20,6 +20,7 @@ class active_iCITRISVAE(pl.LightningModule):
     def __init__(self, c_hid, num_latents, lr,
                  num_causal_vars,
                  run_name,
+                 counter,
                  warmup=100, max_iters=100000,
                  img_width=64,
                  graph_learning_method="ENCO",
@@ -96,6 +97,10 @@ class active_iCITRISVAE(pl.LightningModule):
 
         self.run_name = f"{run_name}__citris"
         self.writer = SummaryWriter(f"runs/{run_name}")
+        # TODO: Find out what determines the maximum amount of epochs
+        self.current_counter = counter * 29
+        print(f"Current counter is: {self.current_counter}")
+
         # Encoder-Decoder init
         if not self.hparams.no_encoder_decoder:
             self.encoder = coding.Encoder(num_latents=self.hparams.num_latents,
@@ -261,20 +266,22 @@ class active_iCITRISVAE(pl.LightningModule):
         loss = loss + 0.1 * loss_z_reg
 
         # Logging
-        self.writer.add_scalar("icitris/kld", kld.mean(), self.global_step)
-        self.writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), self.global_step)
-        self.writer.add_scalar("icitris/intv_classifier_z", loss_z, self.global_step)
-        self.writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, self.global_step)
-        self.writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, self.global_step)
-        self.writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, self.global_step)
-        self.writer.add_scalar("icitris/reg_loss", loss_z_reg, self.global_step)
+        self.writer.add_scalar("icitris/kld", kld.mean(), (self.current_counter + self.global_step))
+        self.writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), (self.current_counter + self.global_step))
+        self.writer.add_scalar("icitris/intv_classifier_z", loss_z, (self.current_counter + self.global_step))
+        self.writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, (self.current_counter + self.global_step))
+        self.writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, (self.current_counter + self.global_step))
+        self.writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, (self.current_counter + self.global_step))
+        self.writer.add_scalar("icitris/reg_loss", loss_z_reg, (self.current_counter + self.global_step))
 
         return loss
 
     def training_step(self, batch, batch_idx):
         loss = self._get_loss(batch, mode='train')
-        self.writer.add_scalar("icitris/train_loss", loss, self.global_step)
-        # self.log('train_loss', loss)
+        self.writer.add_scalar("icitris/train_loss", loss, (self.current_counter + self.global_step))
+        if self.global_step == 29:
+            self.i += 1
+            print(f"Last training_loss: {loss}")
         return loss
 
     def training_epoch_end(self, *args, **kwargs):
@@ -289,8 +296,6 @@ class active_iCITRISVAE(pl.LightningModule):
         :return:
         """
         z_mean, z_logstd = self.encoder(img)
-        # if self.hparams.use_flow_prior: # --> CAUSES SOME SERIOUS WARNINGS
-        #     z_mean, _ = self.flow(z_mean)
         # Get latent assignment to causal vars in binary
         target_assignment = self.prior.get_target_assignment(hard=True)
         # Assign latent vals to their respective causal var
