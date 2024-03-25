@@ -280,7 +280,6 @@ class active_iCITRISVAE(pl.LightningModule):
         loss = self._get_loss(batch, mode='train')
         self.writer.add_scalar("icitris/train_loss", loss, (self.current_counter + self.global_step))
         if self.global_step == 29:
-            self.i += 1
             print(f"Last training_loss: {loss}")
         return loss
 

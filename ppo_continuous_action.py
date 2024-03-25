@@ -145,16 +145,23 @@ class Agent(nn.Module):
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
     def get_value(self, x):
+        # TODO: apply citris encoder-decoder
+        # self.get_causal_rep
         return self.critic(x)
 
     def get_action_and_value(self, x, current_step, training_size, action=None):
+        # TODO: apply citris encoder-decoder
+        # self.get_causal_rep
+        # get_value(self, x)
         action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
+        # TODO: Detach for the action, not the value function
         action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
+        # TODO:  self.get_value(self, x) as value --> not detached
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
@@ -189,7 +196,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_hid', type=int, default=32)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=12)
+    parser.add_argument('--num_latents', type=int, default=32)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -328,7 +335,7 @@ if __name__ == "__main__":
         model_args['num_causal_vars'] = datasets['train'].num_vars()
         model_args['counter'] = citris_logging_counter
 
-        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], seed=args.seed,
+        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'],
                           **model_args)
         citris_logging_counter += 1
         # END MYCODE
@@ -388,6 +395,7 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
+                # TODO: Add weighted train_loss of icitris
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
                 optimizer.zero_grad()

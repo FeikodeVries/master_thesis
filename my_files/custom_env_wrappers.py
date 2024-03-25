@@ -228,7 +228,8 @@ class CausalWrapper(gym.ObservationWrapper):
             img = torch.from_numpy(np.array(obs)).float()
             img = img.permute(0, 3, 1, 2)
 
-            causal_vars = self.citris.get_causal_rep(img).detach().numpy()
+            # TODO: Look into gradients and the compatibility with gymnasium
+            causal_vars = self.citris.get_causal_rep(img)
             causal_rep = {'pixels': causal_vars}
             self.t += 1
             return causal_rep

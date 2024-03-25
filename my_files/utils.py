@@ -566,7 +566,7 @@ def get_default_parser():
     parser.add_argument('--causal_encoder_checkpoint', type=str,
                         default="../data/model_checkpoints/active_iCITRIS/CausalEncoder.ckpt")
     parser.add_argument('--cluster', action="store_true")
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=3)
     parser.add_argument('--max_epochs', type=int, default=10)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
@@ -617,7 +617,8 @@ def gaussian_log_prob(mean, log_std, samples):
 
 def mask_actions(actions, current_step, training_size):
     # Decrease probability of masking out over training
-    prob = np.clip(1 - (current_step / (current_step + training_size)), 0.1, 0.5)
+    # prob = np.clip(1 - (current_step / (current_step + training_size)), 0.1, 0.5)
+    prob = 0.3
     # Mask actions
     mask = np.random.choice([0, 1], actions.shape, p=[prob, 1-prob])
     if isinstance(actions, np.ndarray):
