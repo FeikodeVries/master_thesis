@@ -544,11 +544,12 @@ def train_model(model_class, train_loader, max_epochs=200, check_val_every_n_epo
     trainer_args['log_every_n_steps'] = 2
     root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
     log_dir = str(pathlib.Path(__file__).parent.resolve().parents[0]) + f'/runs/'
+    # TODO: Check if logging is actually disabled and the system still works
     checkpoint_callback = ModelCheckpoint(dirpath=root_dir, save_last=True)
-    trainer = pl.Trainer(default_root_dir=log_dir, callbacks=[checkpoint_callback], accelerator='auto',
+    trainer = pl.Trainer(default_root_dir=log_dir, logger=False, callbacks=[checkpoint_callback], accelerator='auto',
                          max_epochs=max_epochs, check_val_every_n_epoch=1, gradient_clip_val=gradient_clip_val,
                          **trainer_args)
-    trainer.logger._default_hp_metric = None
+    # trainer.logger._default_hp_metric = None
     pretrained_filename = root_dir + 'last.ckpt'
     pl.seed_everything(seed)
     if load_pretrained and os.path.isfile(pretrained_filename):
@@ -617,8 +618,8 @@ def gaussian_log_prob(mean, log_std, samples):
 
 def mask_actions(actions, current_step, training_size):
     # Decrease probability of masking out over training
-    # prob = np.clip(1 - (current_step / (current_step + training_size)), 0.1, 0.5)
-    prob = 0.3
+    prob = np.clip(1 - (current_step / (current_step + training_size)), 0.1, 0.5)
+    # prob = 0.3
     # Mask actions
     mask = np.random.choice([0, 1], actions.shape, p=[prob, 1-prob])
     if isinstance(actions, np.ndarray):

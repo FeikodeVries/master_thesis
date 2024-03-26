@@ -10,7 +10,7 @@ import cv2
 import torch
 import pathlib
 import os
-
+import matplotlib.pyplot as plt
 import cleanrl.my_files.datahandling as dh
 from cleanrl.my_files.active_icitris import active_iCITRISVAE
 
@@ -34,7 +34,6 @@ class CausalWrapper(gym.ObservationWrapper):
     def __init__(
         self,
         env: gym.Env,
-        model,
         shape: Union[tuple, int],
         pixels_only: bool = True,
         render_kwargs: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -42,7 +41,9 @@ class CausalWrapper(gym.ObservationWrapper):
         rgb: bool = False,
         keep_dim: bool = False,
         batch_size: int = 200,
-        causal: bool = True
+        causal: bool = True,
+        latents: int = 32,
+        causal_vars: int = 6
     ):
         """Initializes a new pixel Wrapper.
 
@@ -80,12 +81,13 @@ class CausalWrapper(gym.ObservationWrapper):
 
         # Updating the VAE
         self.batch_size = batch_size
-        self.citris = model
         self.t = 0
         self.causal = causal
         # Data handling
         self.datahandling = dh.DataHandling()
         self.observations = []
+        self.causal_vars = causal_vars
+        self.num_latents = latents
         # END MYCODE
 
         # Avoid side-effects that occur when render_kwargs is manipulated
@@ -161,20 +163,21 @@ class CausalWrapper(gym.ObservationWrapper):
 
             # START MYCODE
             # Convert observation to grayscale and resize
-            if self.causal:
-                pixels_space = spaces.Box(shape=(self.citris.hparams.num_latents, self.citris.hparams.num_causal_vars),
-                                          low=-float("inf"), high=float("inf"), dtype=np.float32)
+            # if self.causal:
+            #     pixels_space = spaces.Box(shape=(self.citris.hparams.num_latents, self.citris.hparams.num_causal_vars),
+            #                               low=-float("inf"), high=float("inf"), dtype=np.float32)
+            # # else:
+            if self.rgb:
+                pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 3),
+                                          low=low, high=high, dtype=pixels.dtype)
             else:
-                if self.rgb:
-                    pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 3),
+                if self.keep_dim:
+                    pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 1),
                                               low=low, high=high, dtype=pixels.dtype)
                 else:
-                    if self.keep_dim:
-                        pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 1),
-                                                  low=low, high=high, dtype=pixels.dtype)
-                    else:
-                        pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1]), low=low,
-                                                  high=high, dtype=pixels.dtype)
+                    pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1]), low=low,
+                                              high=high, dtype=pixels.dtype)
+
             pixels_spaces[pixel_key] = pixels_space
             # END MYCODE
 
@@ -215,26 +218,10 @@ class CausalWrapper(gym.ObservationWrapper):
             elif self.batch_size == self.t:
                 self.datahandling.batch_update_npz(self.observations)
                 self.observations = []
-                # Use pretrained model
-                root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
-                pretrained_filename = root_dir + 'last.ckpt'
-                # Update stored model with new model
-                if os.path.isfile(pretrained_filename):
-                    self.citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
                 self.t = 0
-
-            # Obtain the latent to causal assignment
-            obs = np.array([pixel_observation['pixels']])
-            img = torch.from_numpy(np.array(obs)).float()
-            img = img.permute(0, 3, 1, 2)
-
-            # TODO: Look into gradients and the compatibility with gymnasium
-            causal_vars = self.citris.get_causal_rep(img)
-            causal_rep = {'pixels': causal_vars}
             self.t += 1
-            return causal_rep
-        else:
-            return pixel_observation
+
+        return pixel_observation
         # END MYCODE
 
     def _add_pixel_observation(self, wrapped_observation):

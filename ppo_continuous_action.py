@@ -13,8 +13,11 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
+from torchvision.utils import make_grid
 from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
+from gymnasium import spaces
+
 
 from my_files.datahandling import load_datasets
 import my_files.datahandling as dh
@@ -22,13 +25,13 @@ from my_files.active_icitris import active_iCITRISVAE
 from my_files import custom_env_wrappers as mywrapper
 from my_files.datasets import ReacherDataset
 import my_files.utils as utils
-
+import matplotlib.pyplot as plt
 
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 3
+    seed: int = 4
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -54,7 +57,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 50000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -96,8 +99,12 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma, model, batch_size=100):
+UNFLATTEN_SPACE = None
+
+
+def make_env(env_id, idx, capture_video, run_name, num_latents, num_causal, gamma, batch_size=100):
     def thunk():
+        global UNFLATTEN_SPACE
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
@@ -106,7 +113,9 @@ def make_env(env_id, idx, capture_video, run_name, gamma, model, batch_size=100)
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.CausalWrapper(env, shape=64, rgb=True, batch_size=batch_size, model=model, causal=True)
+        env = mywrapper.CausalWrapper(env, shape=64, rgb=True, batch_size=batch_size, latents=num_latents,
+                                      causal_vars=num_causal, causal=True)
+        UNFLATTEN_SPACE = env.observation_space
         env = gym.wrappers.FlattenObservation(env)
 
         env = mywrapper.ActionWrapper(env, batch_size=batch_size, causal=True)
@@ -126,43 +135,87 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
+    """
+    Combines the PPO agent with the citris implementation to allow for the gradients to flow through the value function
+    """
+    # TODO: define the observation space to be the causal observation space
     def __init__(self, envs):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.causal_model = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
+                                              lr=args_citris.lr, num_causal_vars=args_citris.num_causal_vars,
+                                              run_name=run_name, counter=0)
+
+    def update_causal_model(self):
+        # Use pretrained model
+        root_dir = str(pathlib.Path(__file__).resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
+        pretrained_filename = root_dir + 'last.ckpt'
+        # Update stored model with new model
+        if os.path.isfile(pretrained_filename):
+            self.causal_model = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
+
+    def get_causal_rep_from_img(self, x):
+        """
+        :param x: Unflattened image tensor to be used by iCITRIS
+        :return: Flattened causal representation
+        """
+        final_processed = None
+        for i, j in enumerate(x):
+            img = self.unflatten_and_process(j)
+            causal_rep = self.causal_model.get_causal_rep(img)
+            causal_rep_flat = torch.flatten(causal_rep)[None, :]
+            if final_processed is None:
+                final_processed = causal_rep_flat
+            else:
+                final_processed = torch.cat((final_processed, causal_rep_flat))
+
+        return final_processed
+
+    def unflatten_and_process(self, x):
+        """
+        :param x: Flattened image tensor
+        :return: Unflattened image tensor, to be used by iCITRIS
+        """
+        # Unflatten image
+        unflatten_x = spaces.unflatten(UNFLATTEN_SPACE, x.detach().cpu())
+        # Push the image into the correct shape for icitris to use
+        obs = np.array([unflatten_x['pixels']])
+        img = torch.from_numpy(np.array(obs)).float()
+        img = img.permute(0, 3, 1, 2)
+
+        return img.to(device)
 
     def get_value(self, x):
-        # TODO: apply citris encoder-decoder
-        # self.get_causal_rep
-        return self.critic(x)
+        causal_rep = self.get_causal_rep_from_img(x)
+        return self.critic(causal_rep)
 
     def get_action_and_value(self, x, current_step, training_size, action=None):
-        # TODO: apply citris encoder-decoder
-        # self.get_causal_rep
-        # get_value(self, x)
-        action_mean = self.actor_mean(x)
+        # Prevent the gradient from flowing through the policy
+        # TODO: check if the detach() removes the gradients correctly
+        causal_rep = self.get_causal_rep_from_img(x).detach()
+        action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        # TODO: Detach for the action, not the value function
         action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
-        # TODO:  self.get_value(self, x) as value --> not detached
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
 
 
 if __name__ == "__main__":
@@ -221,6 +274,9 @@ if __name__ == "__main__":
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
 
+    CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
+                                    low=-float("inf"), high=float("inf"), dtype=np.float32)
+
     if args_citris.resume_training:
         root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
         pretrained_filename = root_dir + 'last.ckpt'
@@ -249,8 +305,8 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, model=citris,
-                  batch_size=args.num_steps) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args_citris.num_latents, args_citris.num_causal_vars,
+                  args.gamma, batch_size=args.num_steps) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -337,7 +393,10 @@ if __name__ == "__main__":
 
         utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'],
                           **model_args)
+
         citris_logging_counter += 1
+
+        agent.update_causal_model()
         # END MYCODE
 
         # flatten the batch
@@ -352,11 +411,11 @@ if __name__ == "__main__":
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
+            # TODO: b_obs[mb_inds] is not of the correct observation size?
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
-
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               current_step=global_step,
                                                                               training_size=args.total_timesteps,
@@ -395,7 +454,11 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                # TODO: Add weighted train_loss of icitris
+                # TODO: Add weighted train_loss of icitris --> does .backward influence active icitris?, doesn't seem to
+                #   icitris loss is not a tensor
+                # print(f"Policy loss: {pg_loss}")
+                # print(f"Value loss: {v_loss}")
+                # print(f"ICITRIS loss: {agent.causal_model.last_loss}")
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
                 optimizer.zero_grad()

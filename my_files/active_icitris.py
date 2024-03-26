@@ -7,6 +7,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor
 import numpy as np
 from collections import OrderedDict, defaultdict
 from torch.utils.tensorboard import SummaryWriter
+import pathlib
 
 from cleanrl.my_files import utils
 from cleanrl.my_files import encoder_decoder as coding
@@ -159,6 +160,7 @@ class active_iCITRISVAE(pl.LightningModule):
         self.all_val_dists = defaultdict(list)
         self.all_v_dicts = []
         self.prior_t1 = self.prior
+        self.last_loss = 4000
 
     def forward(self, x):
         # Full encoding and decoding of samples
@@ -278,6 +280,7 @@ class active_iCITRISVAE(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         loss = self._get_loss(batch, mode='train')
+        self.last_loss = loss
         self.writer.add_scalar("icitris/train_loss", loss, (self.current_counter + self.global_step))
         if self.global_step == 29:
             print(f"Last training_loss: {loss}")
