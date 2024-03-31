@@ -7,6 +7,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor
 import numpy as np
 from collections import OrderedDict, defaultdict
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader
 import pathlib
 
 from cleanrl.my_files import utils
@@ -20,8 +21,9 @@ class active_iCITRISVAE(pl.LightningModule):
 
     def __init__(self, c_hid, num_latents, lr,
                  num_causal_vars,
-                 run_name,
                  counter,
+                 run_name,
+                 dataloader_len=0,
                  warmup=100, max_iters=100000,
                  img_width=64,
                  graph_learning_method="ENCO",
@@ -98,9 +100,6 @@ class active_iCITRISVAE(pl.LightningModule):
 
         self.run_name = f"{run_name}__citris"
         self.writer = SummaryWriter(f"runs/{run_name}")
-        # TODO: Find out what determines the maximum amount of epochs
-        self.current_counter = counter * 29
-        print(f"Current counter is: {self.current_counter}")
 
         # Encoder-Decoder init
         if not self.hparams.no_encoder_decoder:
@@ -161,6 +160,9 @@ class active_iCITRISVAE(pl.LightningModule):
         self.all_v_dicts = []
         self.prior_t1 = self.prior
         self.last_loss = 4000
+        self.counter = 0
+        # TODO: Fix the calculation of the maximum amount of training steps
+        # self.counter = ((dataloader_len*self.max_epochs) // self.hparams.accumulate_grad_batches) * counter
 
     def forward(self, x):
         # Full encoding and decoding of samples
@@ -226,8 +228,7 @@ class active_iCITRISVAE(pl.LightningModule):
             out_nll = self.prior.forward(z_sample=z_sample[:, 1:].flatten(0, 1),
                                          target=target.flatten(0, 1),
                                          z_shared=z_sample[:, :-1].flatten(0, 1),
-                                         matrix_exp_factor=np.exp(
-                                             self.matrix_exp_scheduler.get_factor(self.global_step)))
+                                         matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(self.global_step)))
             out_nll = out_nll.unflatten(0, (imgs.shape[0], -1))
             p_z = out_nll
             p_z_x = init_nll - ldj
@@ -266,29 +267,32 @@ class active_iCITRISVAE(pl.LightningModule):
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
 
         loss = loss + 0.1 * loss_z_reg
-
+        print(f"Current step: {self.counter + self.global_step}")
         # Logging
-        self.writer.add_scalar("icitris/kld", kld.mean(), (self.current_counter + self.global_step))
-        self.writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), (self.current_counter + self.global_step))
-        self.writer.add_scalar("icitris/intv_classifier_z", loss_z, (self.current_counter + self.global_step))
-        self.writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, (self.current_counter + self.global_step))
-        self.writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, (self.current_counter + self.global_step))
-        self.writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, (self.current_counter + self.global_step))
-        self.writer.add_scalar("icitris/reg_loss", loss_z_reg, (self.current_counter + self.global_step))
+        self.counter = self.trainer.max_steps * self.repeats
+        self.writer.add_scalar("icitris/kld", kld.mean(), (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/intv_classifier_z", loss_z, (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/reg_loss", loss_z_reg, (self.counter + self.global_step))
 
         return loss
 
     def training_step(self, batch, batch_idx):
         loss = self._get_loss(batch, mode='train')
         self.last_loss = loss
-        self.writer.add_scalar("icitris/train_loss", loss, (self.current_counter + self.global_step))
-        if self.global_step == 29:
-            print(f"Last training_loss: {loss}")
+        self.writer.add_scalar("icitris/train_loss", loss, (self.counter + self.global_step))
+        # TODO: Under the hood pytorch lightning performs the backward step here
         return loss
 
     def training_epoch_end(self, *args, **kwargs):
         super().training_epoch_end(*args, **kwargs)
         self.prior.check_trainability()
+        if self.trainer.max_epochs - 1 == self.current_epoch:
+            path = pathlib.Path(__file__).parent.resolve()
+            torch.save(self.last_loss, f'{path}/data/last_loss.pt')
 
     def get_causal_rep(self, img):
         """

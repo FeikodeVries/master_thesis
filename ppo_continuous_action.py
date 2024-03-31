@@ -63,7 +63,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 1024
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -138,7 +138,6 @@ class Agent(nn.Module):
     """
     Combines the PPO agent with the citris implementation to allow for the gradients to flow through the value function
     """
-    # TODO: define the observation space to be the causal observation space
     def __init__(self, envs):
         super().__init__()
         self.critic = nn.Sequential(
@@ -205,7 +204,6 @@ class Agent(nn.Module):
 
     def get_action_and_value(self, x, current_step, training_size, action=None):
         # Prevent the gradient from flowing through the policy
-        # TODO: check if the detach() removes the gradients correctly
         causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
@@ -246,10 +244,11 @@ if __name__ == "__main__":
     # MYCODE
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=32)
+    parser.add_argument('--c_hid', type=int, default=16)
+    parser.add_argument('--pretraining_frac', type=float, default=0.1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=32)
+    parser.add_argument('--num_latents', type=int, default=12)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -273,6 +272,7 @@ if __name__ == "__main__":
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
+    citris_counter = 0
 
     CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
                                     low=-float("inf"), high=float("inf"), dtype=np.float32)
@@ -299,9 +299,6 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
-    # Test if GPU is found and used
-    # print(("cuda" if torch.cuda.is_available() and args.cuda else "cpu"))
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
@@ -330,7 +327,6 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
-    citris_logging_counter = 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
@@ -389,14 +385,15 @@ if __name__ == "__main__":
 
         model_args['run_name'] = run_name
         model_args['num_causal_vars'] = datasets['train'].num_vars()
-        model_args['counter'] = citris_logging_counter
+        model_args['counter'] = citris_counter
+        model_args['dataloader_len'] = len(data_loaders)
 
-        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'],
-                          **model_args)
-
-        citris_logging_counter += 1
-
+        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
         agent.update_causal_model()
+        path = pathlib.Path(__file__).parent.resolve()
+        last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
+        print(f"CITRIS LOSS: {last_loss}")
+        citris_counter += 1
         # END MYCODE
 
         # flatten the batch
@@ -411,7 +408,6 @@ if __name__ == "__main__":
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
-            # TODO: b_obs[mb_inds] is not of the correct observation size?
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
@@ -454,12 +450,7 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                # TODO: Add weighted train_loss of icitris --> does .backward influence active icitris?, doesn't seem to
-                #   icitris loss is not a tensor
-                # print(f"Policy loss: {pg_loss}")
-                # print(f"Value loss: {v_loss}")
-                # print(f"ICITRIS loss: {agent.causal_model.last_loss}")
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * last_loss)
 
                 optimizer.zero_grad()
                 loss.backward()
