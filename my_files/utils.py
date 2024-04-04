@@ -616,12 +616,10 @@ def gaussian_log_prob(mean, log_std, samples):
     return - log_std - 0.5 * np.log(2*np.pi) - 0.5 * ((samples - mean) / log_std.exp())**2
 
 
-def mask_actions(actions, current_step, training_size):
+def mask_actions(actions, current_step, training_size, dropout_prob=0.5):
     # Decrease probability of masking out over training
-    #prob = np.clip(1 - (current_step / (current_step + training_size)), 0.1, 0.5)
-    prob = 0.5
     # Mask actions
-    mask = np.random.choice([0, 1], actions.shape, p=[prob, 1-prob])
+    mask = np.random.choice([0, 1], actions.shape, p=[dropout_prob, 1-dropout_prob])
     if isinstance(actions, np.ndarray):
         masked_actions = np.multiply(actions, mask)
         return masked_actions

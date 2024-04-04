@@ -15,8 +15,7 @@ from cleanrl.my_files import encoder_decoder as coding
 from cleanrl.my_files import flow_modules as flow
 from cleanrl.my_files import causal_disentanglement as causal
 
-# TODO:
-#   Needed: model, nn
+
 class active_iCITRISVAE(pl.LightningModule):
     """ The main module implementing iCITRIS-VAE """
 

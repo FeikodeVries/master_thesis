@@ -202,7 +202,7 @@ class Agent(nn.Module):
         causal_rep = self.get_causal_rep_from_img(x)
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, action=None, masking=False):
+    def get_action_and_value(self, x, current_step, training_size, action=None, dropout_prob=0.5):
         # Prevent the gradient from flowing through the policy
         causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
@@ -211,8 +211,8 @@ class Agent(nn.Module):
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        if masking:
-            action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
+        action = utils.mask_actions(action, current_step=current_step,
+                                    training_size=training_size, dropout_prob=dropout_prob)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
 
@@ -242,7 +242,8 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
     parser.add_argument('--c_hid', type=int, default=32)
     parser.add_argument('--pretraining_size', type=float, default=50000)
-    parser.add_argument('--update_interval', type=int, default=5)
+    parser.add_argument('--dropout_pretraining', type=float, default=0.7)
+    parser.add_argument('--dropout_update', type=float, default=0.1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
     parser.add_argument('--num_latents', type=int, default=32)
@@ -275,18 +276,6 @@ if __name__ == "__main__":
     CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
                                     low=-float("inf"), high=float("inf"), dtype=np.float32)
 
-    if args_citris.resume_training:
-        root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
-        pretrained_filename = root_dir + 'last.ckpt'
-        # Update stored model with new model
-        if os.path.isfile(pretrained_filename):
-            print('Retrieving causal representation...')
-            citris = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
-        else:
-            print('Causal representation not found')
-    else:
-        citris = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents, lr=args_citris.lr,
-                                   num_causal_vars=args_citris.num_causal_vars, run_name=run_name, counter=0)
     pl.seed_everything(args.seed)
     # END MYCODE
 
@@ -342,11 +331,9 @@ if __name__ == "__main__":
                 # ALGO LOGIC: action logic
                 with torch.no_grad():
                     # Randomised pretraining
-                    # action = envs.action_space.sample()
-                    # action = utils.mask_actions(action, current_step=global_step, training_size=args.total_timesteps)
-                    # action = torch.from_numpy(action).float().to(device)
                     action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
-                                                                           training_size=args.total_timesteps)
+                                                                           training_size=args.total_timesteps,
+                                                                           dropout_prob=args_citris.dropout_pretraining)
                 actions[step] = action
 
                 # TRY NOT TO MODIFY: execute the game and log data.
@@ -402,15 +389,9 @@ if __name__ == "__main__":
             dones[step] = next_done
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                if iteration % args_citris.update_interval == 0:
-                    # Get data from this iteration to update the causal representation
-                    action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
-                                                                           training_size=args.total_timesteps,
-                                                                           masking=True)
-                else:
-                    action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
-                                                                           training_size=args.total_timesteps,
-                                                                           masking=False)
+                action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                                                                       training_size=args.total_timesteps,
+                                                                       dropout_prob=args_citris.dropout_update)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -445,6 +426,7 @@ if __name__ == "__main__":
             returns = advantages + values
 
         if iteration % args_citris.update_interval == 0:
+            # TODO: REFACTOR CODE TO NOT BE LIGHTNING
             # Update VAE to better disentangle causal representation
             datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
 
@@ -461,7 +443,7 @@ if __name__ == "__main__":
             citris_counter += 1
             # END MYCODE
 
-        # TODO: add needed citris params to PPO
+        # TODO: add needed citris params to PPO using ADAM OPTIMIZER
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -481,7 +463,8 @@ if __name__ == "__main__":
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               current_step=global_step,
                                                                               training_size=args.total_timesteps,
-                                                                              action=b_actions[mb_inds])
+                                                                              action=b_actions[mb_inds],
+                                                                              dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
