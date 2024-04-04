@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
-    seed: int = 4
+    seed: int = 3
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -63,7 +63,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 1024
+    num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -202,7 +202,7 @@ class Agent(nn.Module):
         causal_rep = self.get_causal_rep_from_img(x)
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, action=None):
+    def get_action_and_value(self, x, current_step, training_size, action=None, masking=False):
         # Prevent the gradient from flowing through the policy
         causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
@@ -211,7 +211,8 @@ class Agent(nn.Module):
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
+        if masking:
+            action = utils.mask_actions(action, current_step=current_step, training_size=training_size)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
 
@@ -235,20 +236,16 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
 
     # MYCODE
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=16)
-    parser.add_argument('--pretraining_frac', type=float, default=0.1)
+    parser.add_argument('--c_hid', type=int, default=32)
+    parser.add_argument('--pretraining_size', type=float, default=50000)
+    parser.add_argument('--update_interval', type=int, default=5)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=12)
+    parser.add_argument('--num_latents', type=int, default=32)
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -273,7 +270,8 @@ if __name__ == "__main__":
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
     citris_counter = 0
-
+    last_loss = None
+    args.num_pretraining = args_citris.pretraining_size // args.batch_size
     CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
                                     low=-float("inf"), high=float("inf"), dtype=np.float32)
 
@@ -315,6 +313,7 @@ if __name__ == "__main__":
             agent.load_state_dict(torch.load(path))
         else:
             print("Pretrained RL model not found")
+    # TODO: agent.parameters not taking into account the citris params
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -332,6 +331,65 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    # CITRIS PRETRAINING
+    if args.num_pretraining > 0:
+        for iteration in range(1, args.num_pretraining + 1):
+            for step in range(0, args.num_steps):
+                print(f"Current pretraining step: {global_step}")
+                global_step += args.num_envs
+                obs[step] = next_obs
+                dones[step] = next_done
+                # ALGO LOGIC: action logic
+                with torch.no_grad():
+                    # Randomised pretraining
+                    # action = envs.action_space.sample()
+                    # action = utils.mask_actions(action, current_step=global_step, training_size=args.total_timesteps)
+                    # action = torch.from_numpy(action).float().to(device)
+                    action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                                                                           training_size=args.total_timesteps)
+                actions[step] = action
+
+                # TRY NOT TO MODIFY: execute the game and log data.
+                next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+                next_done = np.logical_or(terminations, truncations)
+                rewards[step] = torch.tensor(reward).to(device).view(-1)
+                next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+
+            # MYCODE
+            # Update VAE to better disentangle causal representation
+            datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
+
+            model_args['run_name'] = run_name
+            model_args['num_causal_vars'] = datasets['train'].num_vars()
+            model_args['counter'] = citris_counter
+            model_args['max_epochs'] = args_citris.max_epochs
+            model_args['len_dataloader'] = len(data_loaders['train'])
+
+            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+            agent.update_causal_model()
+            citris_counter += 1
+            # END MYCODE
+
+        # Update the trained values for the RL to use
+        agent.update_causal_model()
+        path = pathlib.Path(__file__).parent.resolve()
+        last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
+
+    writer = SummaryWriter(f"runs/{run_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
+
+    # RESET THE ENVIRONMENT
+    # TRY NOT TO MODIFY: start the game
+    global_step = 0
+    start_time = time.time()
+    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs = torch.Tensor(next_obs).to(device)
+    next_done = torch.zeros(args.num_envs).to(device)
+
+    # RL TRAINING
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -344,8 +402,15 @@ if __name__ == "__main__":
             dones[step] = next_done
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
-                                                                       training_size=args.total_timesteps)
+                if iteration % args_citris.update_interval == 0:
+                    # Get data from this iteration to update the causal representation
+                    action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                                                                           training_size=args.total_timesteps,
+                                                                           masking=True)
+                else:
+                    action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                                                                           training_size=args.total_timesteps,
+                                                                           masking=False)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -379,23 +444,24 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
-        # MYCODE
-        # Update VAE to better disentangle causal representation
-        datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
+        if iteration % args_citris.update_interval == 0:
+            # Update VAE to better disentangle causal representation
+            datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
 
-        model_args['run_name'] = run_name
-        model_args['num_causal_vars'] = datasets['train'].num_vars()
-        model_args['counter'] = citris_counter
-        model_args['dataloader_len'] = len(data_loaders)
+            model_args['run_name'] = run_name
+            model_args['num_causal_vars'] = datasets['train'].num_vars()
+            model_args['counter'] = citris_counter
+            model_args['max_epochs'] = 5
+            model_args['len_dataloader'] = len(data_loaders['train'])
 
-        utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
-        agent.update_causal_model()
-        path = pathlib.Path(__file__).parent.resolve()
-        last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
-        print(f"CITRIS LOSS: {last_loss}")
-        citris_counter += 1
-        # END MYCODE
+            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+            agent.update_causal_model()
+            path = pathlib.Path(__file__).parent.resolve()
+            last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
+            citris_counter += 1
+            # END MYCODE
 
+        # TODO: add needed citris params to PPO
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -450,8 +516,12 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * last_loss)
 
+                # In testing, if pretraining hasn't been performed be sure to leave out last_loss
+                if last_loss is None:
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                else:
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * last_loss)
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)

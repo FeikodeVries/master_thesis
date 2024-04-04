@@ -15,7 +15,8 @@ from cleanrl.my_files import encoder_decoder as coding
 from cleanrl.my_files import flow_modules as flow
 from cleanrl.my_files import causal_disentanglement as causal
 
-
+# TODO:
+#   Needed: model, nn
 class active_iCITRISVAE(pl.LightningModule):
     """ The main module implementing iCITRIS-VAE """
 
@@ -23,7 +24,8 @@ class active_iCITRISVAE(pl.LightningModule):
                  num_causal_vars,
                  counter,
                  run_name,
-                 dataloader_len=0,
+                 max_epochs=0,
+                 len_dataloader=0,
                  warmup=100, max_iters=100000,
                  img_width=64,
                  graph_learning_method="ENCO",
@@ -160,9 +162,11 @@ class active_iCITRISVAE(pl.LightningModule):
         self.all_v_dicts = []
         self.prior_t1 = self.prior
         self.last_loss = 4000
+
+        self.repeats = counter
+        self.len_dataloader = len_dataloader
+        self.total_steps = 0
         self.counter = 0
-        # TODO: Fix the calculation of the maximum amount of training steps
-        # self.counter = ((dataloader_len*self.max_epochs) // self.hparams.accumulate_grad_batches) * counter
 
     def forward(self, x):
         # Full encoding and decoding of samples
@@ -192,6 +196,7 @@ class active_iCITRISVAE(pl.LightningModule):
                 counter_params.append(param)
             else:
                 other_params.append(param)
+        # TODO: AdamW has more of a 'proper' L2-regularization, usually use Adam --> make the same in ppo and citris
         optimizer = optim.AdamW(
             [{'params': graph_params, 'lr': self.hparams.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
              {'params': counter_params, 'lr': 2 * self.hparams.lr, 'weight_decay': 1e-4},
@@ -265,32 +270,32 @@ class active_iCITRISVAE(pl.LightningModule):
         loss = loss + loss_model_mi + loss_z_mi * self.hparams.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
-
         loss = loss + 0.1 * loss_z_reg
-        print(f"Current step: {self.counter + self.global_step}")
+
+        self.step = (self.global_step+1) + (self.repeats * self.trainer.max_epochs * self.len_dataloader)
         # Logging
-        self.counter = self.trainer.max_steps * self.repeats
-        self.writer.add_scalar("icitris/kld", kld.mean(), (self.counter + self.global_step))
-        self.writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), (self.counter + self.global_step))
-        self.writer.add_scalar("icitris/intv_classifier_z", loss_z, (self.counter + self.global_step))
-        self.writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, (self.counter + self.global_step))
-        self.writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, (self.counter + self.global_step))
-        self.writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, (self.counter + self.global_step))
-        self.writer.add_scalar("icitris/reg_loss", loss_z_reg, (self.counter + self.global_step))
+        self.writer.add_scalar("icitris/kld", kld.mean(), self.step)
+        self.writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), self.step)
+        self.writer.add_scalar("icitris/intv_classifier_z", loss_z, self.step)
+        self.writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, self.step)
+        self.writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, self.step)
+        self.writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, self.step)
+        self.writer.add_scalar("icitris/reg_loss", loss_z_reg, self.step)
 
         return loss
 
     def training_step(self, batch, batch_idx):
         loss = self._get_loss(batch, mode='train')
         self.last_loss = loss
-        self.writer.add_scalar("icitris/train_loss", loss, (self.counter + self.global_step))
-        # TODO: Under the hood pytorch lightning performs the backward step here
+        self.writer.add_scalar("icitris/train_loss", loss, self.step)
+
         return loss
 
     def training_epoch_end(self, *args, **kwargs):
         super().training_epoch_end(*args, **kwargs)
         self.prior.check_trainability()
         if self.trainer.max_epochs - 1 == self.current_epoch:
+            print(f"CITRIS last loss: {self.last_loss}")
             path = pathlib.Path(__file__).parent.resolve()
             torch.save(self.last_loss, f'{path}/data/last_loss.pt')
 
