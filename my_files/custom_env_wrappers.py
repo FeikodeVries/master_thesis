@@ -207,19 +207,19 @@ class CausalWrapper(gym.ObservationWrapper):
             if observation.ndim == 2:
                 pixel_observation[key] = np.expand_dims(pixel_observation[key], -1)
 
-        if self.causal:
-            if self.t < self.batch_size:
-                if len(self.observations) == 0:
-                    self.observations = np.array([pixel_observation['pixels']], dtype=np.float32)
-                else:
-                    self.observations = np.concatenate((self.observations,
-                                                        np.array([pixel_observation['pixels']])), axis=0,
-                                                       dtype=np.float32)
-            elif self.batch_size == self.t:
-                self.datahandling.batch_update_npz(self.observations)
-                self.observations = []
-                self.t = 0
-            self.t += 1
+        # if self.causal:
+        #     if self.t < self.batch_size:
+        #         if len(self.observations) == 0:
+        #             self.observations = np.array([pixel_observation['pixels']], dtype=np.float32)
+        #         else:
+        #             self.observations = np.concatenate((self.observations,
+        #                                                 np.array([pixel_observation['pixels']])), axis=0,
+        #                                                dtype=np.float32)
+        #     elif self.batch_size == self.t:
+        #         self.datahandling.batch_update_npz(self.observations)
+        #         self.observations = []
+        #         self.t = 0
+        #     self.t += 1
 
         return pixel_observation
         # END MYCODE
@@ -285,19 +285,19 @@ class ActionWrapper(gym.ActionWrapper):
         :param action: The original :meth:`step` actions:
         :returns: The modified actions
         """
-        if self.causal:
-            self.t += 1
-            if self.t < self.batch_size:
-                # Convert action to intervention
-                intervention = (np.absolute(action) > 0).astype(int)
-                if len(self.actions) == 0:
-                    self.actions = np.array(np.array([intervention], dtype=np.float32))
-                else:
-                    self.actions = np.concatenate((self.actions, np.array([intervention])), axis=0, dtype=np.float32)
-            elif self.batch_size == self.t:
-                self.dh.batch_update_npz(self.actions, filename='intervention')
-                self.actions = []
-                self.t = 0
+        # if self.causal:
+        #     self.t += 1
+        #     if self.t < self.batch_size:
+        #         # Convert action to intervention
+        #         intervention = (np.absolute(action) > 0).astype(int)
+        #         if len(self.actions) == 0:
+        #             self.actions = np.array(np.array([intervention], dtype=np.float32))
+        #         else:
+        #             self.actions = np.concatenate((self.actions, np.array([intervention])), axis=0, dtype=np.float32)
+        #     elif self.batch_size == self.t:
+        #         self.dh.batch_update_npz(self.actions, filename='intervention')
+        #         self.actions = []
+        #         self.t = 0
         return action
 
 

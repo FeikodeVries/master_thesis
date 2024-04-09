@@ -215,6 +215,10 @@ class active_iCITRISVAE(pl.LightningModule):
         else:
             imgs, labels, target = batch
         # En- and decode every element
+        TEST_IMG = imgs.flatten(0,1)
+        # Unflattened shape: (512, 2, 3, 64, 64)
+        # TEST_IMG SHAPE: (1024, 3, 64, 64)
+        # Target shape: (512, 1, 6)
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])

@@ -568,7 +568,7 @@ def get_default_parser():
                         default="../data/model_checkpoints/active_iCITRIS/CausalEncoder.ckpt")
     parser.add_argument('--cluster', action="store_true")
     parser.add_argument('--seed', type=int, default=3)
-    parser.add_argument('--max_epochs', type=int, default=25)
+    parser.add_argument('--max_epochs', type=int, default=5)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--batch_size', type=int, default=512)

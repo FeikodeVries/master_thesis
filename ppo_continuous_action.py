@@ -18,10 +18,10 @@ from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
 from gymnasium import spaces
 
-
 from my_files.datahandling import load_datasets
 import my_files.datahandling as dh
 from my_files.active_icitris import active_iCITRISVAE
+from my_files.new_active_icitris import iCITRIS
 from my_files import custom_env_wrappers as mywrapper
 from my_files.datasets import ReacherDataset
 import my_files.utils as utils
@@ -63,7 +63,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 1024
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -118,7 +118,7 @@ def make_env(env_id, idx, capture_video, run_name, num_latents, num_causal, gamm
         UNFLATTEN_SPACE = env.observation_space
         env = gym.wrappers.FlattenObservation(env)
 
-        env = mywrapper.ActionWrapper(env, batch_size=batch_size, causal=True)
+        # env = mywrapper.ActionWrapper(env, batch_size=batch_size, causal=True)
         env = gym.wrappers.ClipAction(env)
 
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -155,9 +155,15 @@ class Agent(nn.Module):
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
-        self.causal_model = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
-                                              lr=args_citris.lr, num_causal_vars=args_citris.num_causal_vars,
-                                              run_name=run_name, counter=0)
+        # self.causal_model = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
+        #                                       lr=args_citris.lr, num_causal_vars=args_citris.num_causal_vars,
+        #                                       run_name=run_name, counter=0)
+        self.causal_model = iCITRIS(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
+                                    num_causal_vars=args_citris.num_causal_vars, run_name=run_name,
+                                    lambda_sparse=args_citris.lambda_sparse, act_fn=args_citris.act_fn,
+                                    beta_classifier=args_citris.beta_classifier,
+                                    beta_mi_estimator=args_citris.beta_mi_estimator,
+                                    beta_t1=args_citris.beta_t1, autoregressive_prior=args_citris.autoregressive_prior)
 
     def update_causal_model(self):
         # Use pretrained model
@@ -241,7 +247,7 @@ if __name__ == "__main__":
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
     parser.add_argument('--c_hid', type=int, default=32)
-    parser.add_argument('--pretraining_size', type=float, default=50000)
+    parser.add_argument('--pretraining_size', type=float, default=0)
     parser.add_argument('--dropout_pretraining', type=float, default=0.7)
     parser.add_argument('--dropout_update', type=float, default=0.1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)
@@ -302,7 +308,8 @@ if __name__ == "__main__":
             agent.load_state_dict(torch.load(path))
         else:
             print("Pretrained RL model not found")
-    # TODO: agent.parameters not taking into account the citris params
+
+    # TODO: agent.parameters not taking into account the citris params --> merge the optimizers
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -342,31 +349,39 @@ if __name__ == "__main__":
                 rewards[step] = torch.tensor(reward).to(device).view(-1)
                 next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            # MYCODE
-            # Update VAE to better disentangle causal representation
-            datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
-
-            model_args['run_name'] = run_name
-            model_args['num_causal_vars'] = datasets['train'].num_vars()
-            model_args['counter'] = citris_counter
-            model_args['max_epochs'] = args_citris.max_epochs
-            model_args['len_dataloader'] = len(data_loaders['train'])
-
-            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
-            agent.update_causal_model()
-            citris_counter += 1
-            # END MYCODE
+            # # MYCODE
+            # # Update VAE to better disentangle causal representation
+            # datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
+            #
+            # model_args['run_name'] = run_name
+            # model_args['num_causal_vars'] = datasets['train'].num_vars()
+            # model_args['counter'] = citris_counter
+            # model_args['max_epochs'] = args_citris.max_epochs
+            # model_args['len_dataloader'] = len(data_loaders['train'])
+            #
+            # utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+            # agent.update_causal_model()
+            # citris_counter += 1
+            # # END MYCODE
 
         # Update the trained values for the RL to use
-        agent.update_causal_model()
-        path = pathlib.Path(__file__).parent.resolve()
-        last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
+        # agent.update_causal_model()
+        # path = pathlib.Path(__file__).parent.resolve()
+        # last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
+
+    # # TODO: Test the merged optimizer, are all different submodels required, should LR be added? --> provide same lr for citris and submodels
+    # merged_optimizer = optim.Adam([{'params': agent.parameters(), 'lr': args.learning_rate, 'eps': 1e-5},
+    #                                {'params': agent.causal_model.encoder.parameters()},         # Encoder params
+    #                                {'params': agent.causal_model.decoder.parameters()},         # Decoder params
+    #                                {'params': agent.causal_model.prior.parameters()},           # Instantaneous prior params
+    #                                {'params': agent.causal_model.intv_classifier.parameters()}, # Instantaneous target classifier params
+    #                                {'params': agent.causal_model.mi_estimator.parameters()}])   # MIEstimator params
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -425,23 +440,22 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
-        if iteration % args_citris.update_interval == 0:
-            # TODO: REFACTOR CODE TO NOT BE LIGHTNING
-            # Update VAE to better disentangle causal representation
-            datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
-
-            model_args['run_name'] = run_name
-            model_args['num_causal_vars'] = datasets['train'].num_vars()
-            model_args['counter'] = citris_counter
-            model_args['max_epochs'] = 5
-            model_args['len_dataloader'] = len(data_loaders['train'])
-
-            utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
-            agent.update_causal_model()
-            path = pathlib.Path(__file__).parent.resolve()
-            last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
-            citris_counter += 1
-            # END MYCODE
+        # TODO: REFACTOR CODE TO NOT BE LIGHTNING
+        # # Update VAE to better disentangle causal representation
+        # datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
+        #
+        # model_args['run_name'] = run_name
+        # model_args['num_causal_vars'] = datasets['train'].num_vars()
+        # model_args['counter'] = citris_counter
+        # model_args['max_epochs'] = 5
+        # model_args['len_dataloader'] = len(data_loaders['train'])
+        #
+        # utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
+        # agent.update_causal_model()
+        # path = pathlib.Path(__file__).parent.resolve()
+        # last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
+        # citris_counter += 1
+        # # END MYCODE
 
         # TODO: add needed citris params to PPO using ADAM OPTIMIZER
         # flatten the batch
@@ -452,14 +466,28 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
+        interventions = torch.where(actions != 0, 1.0, 0.0)
+
+        # TODO: Is this way of expanding a tensor safe? Is the pixel information retained through unflattening?
+        obs_pairs = torch.cat((obs[:-1], obs[1:]), dim=1)
+        final_obs_pair = torch.cat((obs[-1], obs[-1]), dim=0)[None,:,:]
+        obs_pairs = torch.cat((obs_pairs, final_obs_pair), dim=0)
+        obs_pairs = torch.unflatten(obs_pairs, 2, (3, 64, 64))
+
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
+            # TODO: See if it's okay to remove the random shuffle, as get_loss is dependent on image order
+            #  --> shouldn't make too much of a difference
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
+                # EVERY LOOP IS A MINIBATCH OF 32
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
+                # TODO: make sure that the causal representation is correctly integrated into the retrieval,
+                #  as minibatches might not work as expected
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               current_step=global_step,
                                                                               training_size=args.total_timesteps,
@@ -500,11 +528,12 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
 
+                # TODO: Fix logging of citris loss
+                citris_loss = agent.causal_model.get_loss(obs=obs_pairs[mb_inds], target=interventions[mb_inds],
+                                                          global_step=global_step)
+
                 # In testing, if pretraining hasn't been performed be sure to leave out last_loss
-                if last_loss is None:
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-                else:
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * last_loss)
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * citris_loss)
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
