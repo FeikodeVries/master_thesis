@@ -230,3 +230,18 @@ class iCITRIS(nn.Module):
         latent_causal_assignment = target_assignment * z_mean[0][:, None]
 
         return latent_causal_assignment
+
+    def get_params(self):
+        """
+        Get the relevant parameters to feed to the optimizer
+        """
+        graph_params, counter_params, other_params = [], [], []
+        for name, param in self.named_parameters():
+            if name.startswith('prior.enco') or name.startswith('prior.notears'):
+                graph_params.append(param)
+            elif name.startswith('intv_classifier') or name.startswith('mi_estimator'):
+                counter_params.append(param)
+            else:
+                other_params.append(param)
+
+        return graph_params, counter_params, other_params

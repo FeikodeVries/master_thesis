@@ -268,6 +268,7 @@ if __name__ == "__main__":
     parser.add_argument('--lambda_sparse', type=float, default=0.02)
     parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
+    parser.add_argument('--graph_lr', type=float, default=5e-4)
 
     parser.add_argument('--num_causal_vars', type=int, default=6)
     parser.add_argument('--resume_training', type=bool, default=False)
@@ -310,7 +311,7 @@ if __name__ == "__main__":
             print("Pretrained RL model not found")
 
     # TODO: agent.parameters not taking into account the citris params --> merge the optimizers
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    # optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -375,13 +376,16 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
-    # # TODO: Test the merged optimizer, are all different submodels required, should LR be added? --> provide same lr for citris and submodels
-    # merged_optimizer = optim.Adam([{'params': agent.parameters(), 'lr': args.learning_rate, 'eps': 1e-5},
-    #                                {'params': agent.causal_model.encoder.parameters()},         # Encoder params
-    #                                {'params': agent.causal_model.decoder.parameters()},         # Decoder params
-    #                                {'params': agent.causal_model.prior.parameters()},           # Instantaneous prior params
-    #                                {'params': agent.causal_model.intv_classifier.parameters()}, # Instantaneous target classifier params
-    #                                {'params': agent.causal_model.mi_estimator.parameters()}])   # MIEstimator params
+    # TODO: Test if there are no overlaps
+    # Get the different params from the causal model
+    citris_graph_params, citris_counter_params, citris_other_params = agent.causal_model.get_params()
+    # Remove the causal model params from the PPO agent
+    agent_params = [param for name, param in agent.named_parameters() if not name.startswith('causal_model')]
+
+    optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
+                            {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
+                            {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
+                            {'params': citris_other_params}], lr=args_citris.lr, weight_decay=0.0)
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -457,7 +461,6 @@ if __name__ == "__main__":
         # citris_counter += 1
         # # END MYCODE
 
-        # TODO: add needed citris params to PPO using ADAM OPTIMIZER
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -479,6 +482,7 @@ if __name__ == "__main__":
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
+            print(f'OPTIMISATION EPOCH: {epoch}')
             # TODO: See if it's okay to remove the random shuffle, as get_loss is dependent on image order
             #  --> shouldn't make too much of a difference
             np.random.shuffle(b_inds)
