@@ -180,8 +180,8 @@ class Agent(nn.Module):
         """
         final_processed = None
         for i, j in enumerate(x):
-            img = self.unflatten_and_process(j)
-            causal_rep = self.causal_model.get_causal_rep(img)
+            # img = self.unflatten_and_process(j)
+            causal_rep = self.causal_model.get_causal_rep(j)
             causal_rep_flat = torch.flatten(causal_rep)[None, :]
             if final_processed is None:
                 final_processed = causal_rep_flat
@@ -310,9 +310,6 @@ if __name__ == "__main__":
         else:
             print("Pretrained RL model not found")
 
-    # TODO: agent.parameters not taking into account the citris params --> merge the optimizers
-    # optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -320,6 +317,8 @@ if __name__ == "__main__":
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+
+    causal_reps = torch.zeros((args.num_steps, args.num_envs) + CAUSAL_OBSERVATION.shape).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -376,7 +375,7 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
-    # TODO: Test if there are no overlaps
+    # TODO: Check if it is okay to remove the causal model params from the PPO system and get them from
     # Get the different params from the causal model
     citris_graph_params, citris_counter_params, citris_other_params = agent.causal_model.get_params()
     # Remove the causal model params from the PPO agent
@@ -531,10 +530,11 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-
-                # TODO: Fix logging of citris loss
                 citris_loss = agent.causal_model.get_loss(obs=obs_pairs[mb_inds], target=interventions[mb_inds],
-                                                          global_step=global_step)
+                                                          global_step=global_step,
+                                                          writer=writer,
+                                                          epoch=epoch*args.batch_size,
+                                                          final_epoch=args.update_epochs)
 
                 # In testing, if pretraining hasn't been performed be sure to leave out last_loss
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * citris_loss)

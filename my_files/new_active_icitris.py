@@ -95,9 +95,6 @@ class iCITRIS(nn.Module):
         self.beta_classifier = beta_classifier
         self.beta_t1 = beta_t1
 
-        self.run_name = f"{run_name}__citris"
-        self.writer = SummaryWriter(f"runs/{run_name}")
-
         # Encoder-Decoder init
         self.encoder = coding.Encoder(num_latents=num_latents,
                                       c_hid=c_hid,
@@ -162,11 +159,10 @@ class iCITRIS(nn.Module):
     def decode(self, z_sample):
         return self.decoder(z_sample)
 
-    def get_loss(self, obs, target, global_step):
+    def get_loss(self, obs, target, global_step, final_epoch, writer, epoch):
         """ Main training method for calculating the loss """
         # TODO: Is it okay to remove the possibility of using the normalising flow prior
         #  to simplify both code and decrease the project scope
-        #   Find out what the beta_t1 was supposed to be?
         imgs = obs
         labels = obs
 
@@ -186,8 +182,7 @@ class iCITRIS(nn.Module):
                                  z_logstd=z_logstd[:, 1:].flatten(0, 1),
                                  target=target.flatten(0, 1),
                                  z_shared=z_sample[:, :-1].flatten(0, 1),
-                                 matrix_exp_factor=np.exp(
-                                     self.matrix_exp_scheduler.get_factor(global_step)))
+                                 matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(global_step)))
         kld = kld.unflatten(0, (imgs.shape[0], -1))
 
         # Calculate reconstruction loss
@@ -195,7 +190,6 @@ class iCITRIS(nn.Module):
         # Combine to full loss
         loss = (kld * self.beta_t1 + rec_loss).mean()
         # Target classifier
-        # TODO: fix logging
         loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
                                                   logger=None,
                                                   target=target,
@@ -213,6 +207,16 @@ class iCITRIS(nn.Module):
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
+
+        if epoch == final_epoch - 1:
+            writer.add_scalar("icitris/kld", kld.mean(), global_step)
+            writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), global_step)
+            writer.add_scalar("icitris/intv_classifier_z", loss_z, global_step)
+            writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, global_step)
+            writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, global_step)
+            writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, global_step)
+            writer.add_scalar("icitris/reg_loss", loss_z_reg, global_step)
+            writer.add_scalar("icitris/train_loss", loss, global_step)
 
         return loss
 
