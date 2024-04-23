@@ -208,18 +208,18 @@ class CausalWrapper(gym.ObservationWrapper):
                 pixel_observation[key] = np.expand_dims(pixel_observation[key], -1)
 
         # if self.causal:
-        #     if self.t < self.batch_size:
-        #         if len(self.observations) == 0:
-        #             self.observations = np.array([pixel_observation['pixels']], dtype=np.float32)
-        #         else:
-        #             self.observations = np.concatenate((self.observations,
-        #                                                 np.array([pixel_observation['pixels']])), axis=0,
-        #                                                dtype=np.float32)
-        #     elif self.batch_size == self.t:
-        #         self.datahandling.batch_update_npz(self.observations)
-        #         self.observations = []
-        #         self.t = 0
-        #     self.t += 1
+        if self.t < self.batch_size:
+            if len(self.observations) == 0:
+                self.observations = np.array([pixel_observation['pixels']], dtype=np.float32)
+            else:
+                self.observations = np.concatenate((self.observations,
+                                                    np.array([pixel_observation['pixels']])), axis=0,
+                                                   dtype=np.float32)
+        elif self.batch_size == self.t:
+            self.datahandling.batch_update_npz(self.observations)
+            self.observations = []
+            self.t = 0
+        self.t += 1
 
         return pixel_observation
         # END MYCODE

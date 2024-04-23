@@ -571,7 +571,7 @@ def get_default_parser():
     parser.add_argument('--max_epochs', type=int, default=5)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
-    parser.add_argument('--batch_size', type=int, default=512)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--exclude_vars', type=str, nargs='+', default=None)
     parser.add_argument('--exclude_objects', type=int, nargs='+', default=None)

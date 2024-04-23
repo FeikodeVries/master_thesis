@@ -15,8 +15,8 @@ import pathlib
 
 class BaseDataset(data.Dataset):
     """
-        Load the data for the VAE to train on
-        """
+    Load the data for the VAE to train on
+    """
 
     # In PinballDataset, they provide numbers indicating maximum value after the ordereddict, should i do this?
 
@@ -33,12 +33,13 @@ class BaseDataset(data.Dataset):
 
     CAUSAL_VAR_NAMES = ['base', 'root']
 
-    def __init__(self, data_folder, split='train', single_image=False, seq_len=2, **kwargs):
+    def __init__(self, data_folder, interventions, split='train', single_image=False, seq_len=2, **kwargs):
         super().__init__()
         image_path = data_folder + 'images.npz'
-        target_path = data_folder + 'intervention.npz'
+        # target_path = data_folder + 'intervention.npz'
         self.imgs = torch.from_numpy(np.load(image_path)['entries'])
-        self.targets = torch.from_numpy(np.load(target_path)['entries'])
+        # self.targets = torch.from_numpy(np.load(target_path)['entries'])
+        self.targets = interventions
 
         self._clean_up_data()
         self.split_name = split
@@ -67,28 +68,6 @@ class BaseDataset(data.Dataset):
             imgs = imgs.float() / 255.0
             imgs = imgs * 2.0 - 1.0
             return imgs
-
-    @torch.no_grad()
-    def encode_dataset(self, encoder, batch_size=20):
-        device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-        encoder.eval()
-        encoder.to(device)
-        encodings = None
-        for idx in tqdm(range(0, self.imgs.shape[0], batch_size), desc='Encoding dataset...', leave=False):
-            batch = self.imgs[idx:idx + batch_size].to(device)
-            batch = self._prepare_imgs(batch)
-            if len(batch.shape) == 5:
-                batch = batch.flatten(0, 1)
-            batch = encoder(batch)
-            if len(self.imgs.shape) == 5:
-                batch = batch.unflatten(0, (-1, self.imgs.shape[1]))
-            batch = batch.detach().cpu()
-            if encodings is None:
-                encodings = torch.zeros(self.imgs.shape[:-3] + batch.shape[-1:], dtype=batch.dtype, device='cpu')
-            encodings[idx:idx + batch_size] = batch
-        self.imgs = encodings
-        self.encodings_active = True
-        return encodings
 
     def load_encodings(self, filename):
         self.imgs = torch.load(filename)

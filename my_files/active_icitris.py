@@ -217,6 +217,7 @@ class active_iCITRISVAE(pl.LightningModule):
         # En- and decode every element
         TEST_IMG = imgs.flatten(0,1)
         # Unflattened shape: (512, 2, 3, 64, 64)
+
         # TEST_IMG SHAPE: (1024, 3, 64, 64)
         # Target shape: (512, 1, 6)
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))

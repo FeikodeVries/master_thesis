@@ -13,12 +13,16 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
+import cv2
+import scipy.misc
 from torchvision.utils import make_grid
 from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
 from gymnasium import spaces
+from tqdm.auto import tqdm
 
-from my_files.datahandling import load_datasets
+import torchvision.transforms as T
+from my_files.datahandling import load_datasets, load_data_new
 import my_files.datahandling as dh
 from my_files.active_icitris import active_iCITRISVAE
 from my_files.new_active_icitris import iCITRIS
@@ -57,7 +61,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 50000
+    total_timesteps: int = 500000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -180,8 +184,8 @@ class Agent(nn.Module):
         """
         final_processed = None
         for i, j in enumerate(x):
-            # img = self.unflatten_and_process(j)
-            causal_rep = self.causal_model.get_causal_rep(j)
+            img = self.unflatten_and_process(j)
+            causal_rep = self.causal_model.get_causal_rep(img)
             causal_rep_flat = torch.flatten(causal_rep)[None, :]
             if final_processed is None:
                 final_processed = causal_rep_flat
@@ -375,12 +379,12 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
-    # TODO: Check if it is okay to remove the causal model params from the PPO system and get them from
     # Get the different params from the causal model
     citris_graph_params, citris_counter_params, citris_other_params = agent.causal_model.get_params()
     # Remove the causal model params from the PPO agent
     agent_params = [param for name, param in agent.named_parameters() if not name.startswith('causal_model')]
 
+    # TODO: Potentially use AdamW
     optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
                             {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
                             {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
@@ -471,19 +475,38 @@ if __name__ == "__main__":
         # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
         interventions = torch.where(actions != 0, 1.0, 0.0)
 
-        # TODO: Is this way of expanding a tensor safe? Is the pixel information retained through unflattening?
-        obs_pairs = torch.cat((obs[:-1], obs[1:]), dim=1)
-        final_obs_pair = torch.cat((obs[-1], obs[-1]), dim=0)[None,:,:]
-        obs_pairs = torch.cat((obs_pairs, final_obs_pair), dim=0)
-        obs_pairs = torch.unflatten(obs_pairs, 2, (3, 64, 64))
+        datasets, data_loaders, data_name = load_data_new(args_citris, interventions=interventions, env_name='Walker')
+
+        pair_path = str(pathlib.Path(__file__).parent.resolve()) + '/my_files/data/images.npz'
+        unflatten_obs = np.load(pair_path)['entries'].astype(np.uint8)
+        unflatten_obs = torch.tensor(unflatten_obs).permute(0, 3, 1, 2).to(device)
+
+
+        # TODO: Unflattened images seem to have some weird colours
+        # Unflatten the images so iCITRIS can use them
+        # unflatten_obs = None
+        # for img in obs:
+        #     flat_img = agent.unflatten_and_process(img)
+        #     if unflatten_obs is None:
+        #         unflatten_obs = flat_img
+        #     else:
+        #         unflatten_obs = torch.cat((unflatten_obs, flat_img), dim=0)
+        #
+        # array_img = unflatten_obs.cpu().detach().numpy()[0]
+
+        # cv2.imshow('test', array_img)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+
+        # obs_pairs = torch.cat((unflatten_obs[:-1], unflatten_obs[1:]), dim=1)
+        # first_obs_pair = torch.cat((unflatten_obs[0], unflatten_obs[0]), dim=0)[None,:,:]
+        # obs_pairs = torch.cat((first_obs_pair, obs_pairs), dim=0)
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
-            print(f'OPTIMISATION EPOCH: {epoch}')
-            # TODO: See if it's okay to remove the random shuffle, as get_loss is dependent on image order
-            #  --> shouldn't make too much of a difference
+            print(f'UPDATE EPOCH {epoch}')
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
                 # EVERY LOOP IS A MINIBATCH OF 32
@@ -530,14 +553,15 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                citris_loss = agent.causal_model.get_loss(obs=obs_pairs[mb_inds], target=interventions[mb_inds],
+                # MYCODE
+                # Calculate citris loss
+                citris_loss = agent.causal_model.get_loss(obs=unflatten_obs[mb_inds], target=interventions[mb_inds],
                                                           global_step=global_step,
                                                           writer=writer,
-                                                          epoch=epoch*args.batch_size,
+                                                          epoch=epoch,
                                                           final_epoch=args.update_epochs)
 
-                # In testing, if pretraining hasn't been performed be sure to leave out last_loss
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + (0.00125 * citris_loss)
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)

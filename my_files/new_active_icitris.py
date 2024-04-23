@@ -161,13 +161,12 @@ class iCITRIS(nn.Module):
 
     def get_loss(self, obs, target, global_step, final_epoch, writer, epoch):
         """ Main training method for calculating the loss """
-        # TODO: Is it okay to remove the possibility of using the normalising flow prior
-        #  to simplify both code and decrease the project scope
-        imgs = obs
-        labels = obs
+        # TODO: obs should be a batch from the dataloader, an image pair should be formed when the batch is retrieved
+        imgs = obs.float()
+        labels = obs.float()
 
         # En- and decode every element
-        z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
+        z_mean, z_logstd = self.encoder(imgs)
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])
         z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
@@ -208,7 +207,9 @@ class iCITRIS(nn.Module):
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
 
-        if epoch == final_epoch - 1:
+        # TODO: Fix logging --> logging called multiple times in the final batch
+        if epoch == (final_epoch - 1):
+            print('LOGGING...')
             writer.add_scalar("icitris/kld", kld.mean(), global_step)
             writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), global_step)
             writer.add_scalar("icitris/intv_classifier_z", loss_z, global_step)
@@ -227,11 +228,13 @@ class iCITRIS(nn.Module):
         :param img:
         :return:
         """
+        # TODO: Check if this works
         z_mean, z_logstd = self.encoder(img)
+        z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars in binary
         target_assignment = self.prior.get_target_assignment(hard=True)
         # Assign latent vals to their respective causal var
-        latent_causal_assignment = target_assignment * z_mean[0][:, None]
+        latent_causal_assignment = target_assignment * z_sample[0][:, None]
 
         return latent_causal_assignment
 
