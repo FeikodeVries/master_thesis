@@ -159,14 +159,19 @@ class iCITRIS(nn.Module):
     def decode(self, z_sample):
         return self.decoder(z_sample)
 
-    def get_loss(self, obs, target, global_step, final_epoch, writer, epoch):
+    def get_loss(self, batch, target, global_step, final_epoch, writer, epoch):
         """ Main training method for calculating the loss """
-        # TODO: obs should be a batch from the dataloader, an image pair should be formed when the batch is retrieved
-        imgs = obs.float()
-        labels = obs.float()
+        # TODO: interventions are all 0?
+        imgs = batch.cuda()
+        target = target.cuda().flatten(0, 1)
+        labels = imgs
+
+        # TODO: Seems that the dimensions of the target are different than the default version due to being inherited,
+        #   Check if this flattening is okay
+        # TODO: MI_estimator is returning NAN --> find out why
 
         # En- and decode every element
-        z_mean, z_logstd = self.encoder(imgs)
+        z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])
         z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
@@ -207,19 +212,11 @@ class iCITRIS(nn.Module):
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
 
-        # TODO: Fix logging --> logging called multiple times in the final batch
-        if epoch == (final_epoch - 1):
-            print('LOGGING...')
-            writer.add_scalar("icitris/kld", kld.mean(), global_step)
-            writer.add_scalar("icitris/rec_loss_t1",  rec_loss.mean(), global_step)
-            writer.add_scalar("icitris/intv_classifier_z", loss_z, global_step)
-            writer.add_scalar("icitris/mi_estimator_model", loss_model_mi, global_step)
-            writer.add_scalar("icitris/mi_estimator_z", loss_z_mi, global_step)
-            writer.add_scalar("icitris/mi_estimator_factor", scheduler_factor, global_step)
-            writer.add_scalar("icitris/reg_loss", loss_z_reg, global_step)
-            writer.add_scalar("icitris/train_loss", loss, global_step)
+        logging = {'kld': kld.mean(), 'rec_loss_t1': rec_loss.mean(), 'intv_classifier_z': loss_z,
+                   'mi_estimator_model': loss_model_mi, 'mi_estimator_z': loss_z_mi,
+                   'mi_estimator_factor': scheduler_factor, 'reg_loss': loss_z_reg}
 
-        return loss
+        return loss, logging
 
     def get_causal_rep(self, img):
         """

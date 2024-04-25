@@ -58,6 +58,7 @@ class BaseDataset(data.Dataset):
             self.imgs = self.imgs.permute(0, 1, 4, 2, 3)  # Push channels to PyTorch dimension
         else:
             self.imgs = self.imgs.permute(0, 3, 1, 2)
+
         self.target_names = ReacherDataset.CAUSAL_VAR_NAMES
         # print(f'Using the causal variables {self.target_names}')
 
@@ -78,6 +79,9 @@ class BaseDataset(data.Dataset):
 
     def num_labels(self):
         return -1
+
+    def get_imgs(self, idx):
+        return self.imgs[idx]
 
     def num_vars(self):
         return self.targets.shape[-1]
@@ -109,7 +113,7 @@ class BaseDataset(data.Dataset):
             returns += [target]
 
         img_pair = self._prepare_imgs(img_pair)
-        returns = [img_pair] + returns
+        returns = [img_pair] + returns + [idx]
 
         return tuple(returns) if len(returns) > 1 else returns[0]
 

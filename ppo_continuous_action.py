@@ -3,7 +3,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-
+import cProfile, pstats
 import gymnasium as gym
 import numpy as np
 import torch
@@ -61,7 +61,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 500000
+    total_timesteps: int = 50000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -77,7 +77,7 @@ class Args:
     """the lambda for the general advantage estimation"""
     num_minibatches: int = 32
     """the number of mini-batches"""
-    update_epochs: int = 10
+    update_epochs: int = 1
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -122,7 +122,6 @@ def make_env(env_id, idx, capture_video, run_name, num_latents, num_causal, gamm
         UNFLATTEN_SPACE = env.observation_space
         env = gym.wrappers.FlattenObservation(env)
 
-        # env = mywrapper.ActionWrapper(env, batch_size=batch_size, causal=True)
         env = gym.wrappers.ClipAction(env)
 
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -177,20 +176,17 @@ class Agent(nn.Module):
         if os.path.isfile(pretrained_filename):
             self.causal_model = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
 
-    def get_causal_rep_from_img(self, x):
+    def get_causal_rep_from_img(self, x, forward):
         """
         :param x: Unflattened image tensor to be used by iCITRIS
         :return: Flattened causal representation
         """
         final_processed = None
         for i, j in enumerate(x):
-            img = self.unflatten_and_process(j)
+            img = self.unflatten_and_process(j) if forward else x
             causal_rep = self.causal_model.get_causal_rep(img)
             causal_rep_flat = torch.flatten(causal_rep)[None, :]
-            if final_processed is None:
-                final_processed = causal_rep_flat
-            else:
-                final_processed = torch.cat((final_processed, causal_rep_flat))
+            final_processed = causal_rep_flat if final_processed is None else torch.cat((final_processed, causal_rep_flat))
 
         return final_processed
 
@@ -212,9 +208,12 @@ class Agent(nn.Module):
         causal_rep = self.get_causal_rep_from_img(x)
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, action=None, dropout_prob=0.5):
+    def get_action_and_value(self, x, current_step, training_size, raw_x=None, forward=True, action=None, dropout_prob=0.5):
         # Prevent the gradient from flowing through the policy
-        causal_rep = self.get_causal_rep_from_img(x).detach()
+        if forward:
+            causal_rep = self.get_causal_rep_from_img(x, forward).detach()
+        else:
+            causal_rep = self.get_causal_rep_from_img(raw_x, forward).detach()
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
@@ -228,6 +227,8 @@ class Agent(nn.Module):
 
 
 if __name__ == "__main__":
+    profiler = cProfile.Profile()
+    profiler.enable()
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -331,48 +332,6 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-    # CITRIS PRETRAINING
-    if args.num_pretraining > 0:
-        for iteration in range(1, args.num_pretraining + 1):
-            for step in range(0, args.num_steps):
-                print(f"Current pretraining step: {global_step}")
-                global_step += args.num_envs
-                obs[step] = next_obs
-                dones[step] = next_done
-                # ALGO LOGIC: action logic
-                with torch.no_grad():
-                    # Randomised pretraining
-                    action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
-                                                                           training_size=args.total_timesteps,
-                                                                           dropout_prob=args_citris.dropout_pretraining)
-                actions[step] = action
-
-                # TRY NOT TO MODIFY: execute the game and log data.
-                next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-                next_done = np.logical_or(terminations, truncations)
-                rewards[step] = torch.tensor(reward).to(device).view(-1)
-                next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
-
-            # # MYCODE
-            # # Update VAE to better disentangle causal representation
-            # datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
-            #
-            # model_args['run_name'] = run_name
-            # model_args['num_causal_vars'] = datasets['train'].num_vars()
-            # model_args['counter'] = citris_counter
-            # model_args['max_epochs'] = args_citris.max_epochs
-            # model_args['len_dataloader'] = len(data_loaders['train'])
-            #
-            # utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
-            # agent.update_causal_model()
-            # citris_counter += 1
-            # # END MYCODE
-
-        # Update the trained values for the RL to use
-        # agent.update_causal_model()
-        # path = pathlib.Path(__file__).parent.resolve()
-        # last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
-
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -447,23 +406,6 @@ if __name__ == "__main__":
                 advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
             returns = advantages + values
 
-        # TODO: REFACTOR CODE TO NOT BE LIGHTNING
-        # # Update VAE to better disentangle causal representation
-        # datasets, data_loaders, data_name = load_datasets(args_citris, 'Walker')
-        #
-        # model_args['run_name'] = run_name
-        # model_args['num_causal_vars'] = datasets['train'].num_vars()
-        # model_args['counter'] = citris_counter
-        # model_args['max_epochs'] = 5
-        # model_args['len_dataloader'] = len(data_loaders['train'])
-        #
-        # utils.train_model(model_class=active_iCITRISVAE, train_loader=data_loaders['train'], **model_args)
-        # agent.update_causal_model()
-        # path = pathlib.Path(__file__).parent.resolve()
-        # last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
-        # citris_counter += 1
-        # # END MYCODE
-
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -477,46 +419,28 @@ if __name__ == "__main__":
 
         datasets, data_loaders, data_name = load_data_new(args_citris, interventions=interventions, env_name='Walker')
 
-        pair_path = str(pathlib.Path(__file__).parent.resolve()) + '/my_files/data/images.npz'
-        unflatten_obs = np.load(pair_path)['entries'].astype(np.uint8)
-        unflatten_obs = torch.tensor(unflatten_obs).permute(0, 3, 1, 2).to(device)
-
-
-        # TODO: Unflattened images seem to have some weird colours
-        # Unflatten the images so iCITRIS can use them
-        # unflatten_obs = None
-        # for img in obs:
-        #     flat_img = agent.unflatten_and_process(img)
-        #     if unflatten_obs is None:
-        #         unflatten_obs = flat_img
-        #     else:
-        #         unflatten_obs = torch.cat((unflatten_obs, flat_img), dim=0)
-        #
-        # array_img = unflatten_obs.cpu().detach().numpy()[0]
-
-        # cv2.imshow('test', array_img)
-        # cv2.waitKey(0)
-        # cv2.destroyAllWindows()
-
-        # obs_pairs = torch.cat((unflatten_obs[:-1], unflatten_obs[1:]), dim=1)
-        # first_obs_pair = torch.cat((unflatten_obs[0], unflatten_obs[0]), dim=0)[None,:,:]
-        # obs_pairs = torch.cat((first_obs_pair, obs_pairs), dim=0)
-
         # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        # b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
             print(f'UPDATE EPOCH {epoch}')
-            np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
+            # np.random.shuffle(b_inds)
+            # TODO: Test if the shuffled datapoints cause issues
+            for x in data_loaders['train']:
+                img_pairs = x[0]
+                targets = x[1]
+                mb_inds = np.array(x[2])
+
+                # for start in range(0, args.batch_size, args.minibatch_size):
                 # EVERY LOOP IS A MINIBATCH OF 32
-                end = start + args.minibatch_size
-                mb_inds = b_inds[start:end]
-                # TODO: make sure that the causal representation is correctly integrated into the retrieval,
-                #  as minibatches might not work as expected
+                # end = start + args.minibatch_size
+                # mb_inds = b_inds[start:end]
+                unflattened_obs = datasets.get_imgs(mb_inds)
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
+                                                                              raw_x=unflattened_obs,
                                                                               current_step=global_step,
                                                                               training_size=args.total_timesteps,
+                                                                              forward=False,
                                                                               action=b_actions[mb_inds],
                                                                               dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]
@@ -555,11 +479,12 @@ if __name__ == "__main__":
                 entropy_loss = entropy.mean()
                 # MYCODE
                 # Calculate citris loss
-                citris_loss = agent.causal_model.get_loss(obs=unflatten_obs[mb_inds], target=interventions[mb_inds],
-                                                          global_step=global_step,
-                                                          writer=writer,
-                                                          epoch=epoch,
-                                                          final_epoch=args.update_epochs)
+                citris_loss, citris_logs = agent.causal_model.get_loss(batch=img_pairs,
+                                                                       target=targets,
+                                                                       global_step=global_step,
+                                                                       writer=writer,
+                                                                       epoch=epoch,
+                                                                       final_epoch=args.update_epochs)
 
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
                 optimizer.zero_grad()
@@ -583,8 +508,22 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
+
+        # CITRIS LOGGING
+        for key, value in citris_logs.items():
+            writer.add_scalar(f"icitris/{key}", value, global_step)
+        writer.add_scalar("icitris/train_loss", citris_loss, global_step)
+
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+        profiler.disable()
+        stats = pstats.Stats(profiler).sort_stats('tottime')
+        stats.print_stats()
+        test = 0
+
+        # TODO: Improve efficiency, most costly calls are: --> get_action_and_value, encoder_decoder.py(forward)
+        #  get_causal_rep_from_img, get_causal_rep, custom_env_wrapper (observations), get_value
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

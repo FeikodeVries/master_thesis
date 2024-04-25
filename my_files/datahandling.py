@@ -98,8 +98,9 @@ def load_data_new(args, interventions, env_name):
     folder = str(pathlib.Path(__file__).parent.resolve()) + '/data/'
 
     train_data = DataClass(data_folder=folder, interventions=interventions, split='train', single_image=False, seq_len=2, **dataset_args)
-    train_loader = data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-                                   pin_memory=True, drop_last=True, num_workers=args.num_workers)
+    # TODO: pin_memory and num_workers had to be disabled to allow for the use of dataloaders strangely
+    train_loader = data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False,
+                                   pin_memory=False, drop_last=True, num_workers=0)
 
     datasets = {
         'train': train_data

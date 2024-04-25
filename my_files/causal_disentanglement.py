@@ -562,17 +562,6 @@ class MIEstimator(nn.Module):
         reg_loss = 0.001 * (model_out ** 2).mean()  # To keep outputs in a reasonable range
         loss_model = loss_model + reg_loss
 
-        # # Logging
-        # if logger is not None:
-        #     with torch.no_grad():
-        #         acc = (z_out.argmax(dim=1) == 0).float()
-        #         for b in range(self.num_blocks):
-        #             num_elem = intv_target_onehot[:, b].sum().item()
-        #             if num_elem > 0:
-        #                 acc_b = (acc * intv_target_onehot[:, b]).sum() / num_elem
-        #                 logger.log(f'mi_estimator_accuracy_{self._tag_to_str(b)}', acc_b, on_step=False, on_epoch=True)
-        #         logger.log('mi_estimator_output_square', (model_out ** 2).mean(), on_step=False, on_epoch=True)
-
         return loss_model, loss_z
 
 
