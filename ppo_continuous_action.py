@@ -67,7 +67,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 1024
+    num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -77,7 +77,7 @@ class Args:
     """the lambda for the general advantage estimation"""
     num_minibatches: int = 32
     """the number of mini-batches"""
-    update_epochs: int = 1
+    update_epochs: int = 10
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -176,14 +176,14 @@ class Agent(nn.Module):
         if os.path.isfile(pretrained_filename):
             self.causal_model = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
 
-    def get_causal_rep_from_img(self, x, forward):
+    def get_causal_rep_from_img(self, x):
         """
         :param x: Unflattened image tensor to be used by iCITRIS
         :return: Flattened causal representation
         """
         final_processed = None
         for i, j in enumerate(x):
-            img = self.unflatten_and_process(j) if forward else x
+            img = self.unflatten_and_process(j)
             causal_rep = self.causal_model.get_causal_rep(img)
             causal_rep_flat = torch.flatten(causal_rep)[None, :]
             final_processed = causal_rep_flat if final_processed is None else torch.cat((final_processed, causal_rep_flat))
@@ -206,14 +206,19 @@ class Agent(nn.Module):
 
     def get_value(self, x):
         causal_rep = self.get_causal_rep_from_img(x)
+        # causal_rep = torch.flatten(causal_rep)[None, :]
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, raw_x=None, forward=True, action=None, dropout_prob=0.5):
+    def get_action_and_value(self, x, current_step, training_size, raw_x=None, loaded_causal=None, forward=True,
+                             action=None, dropout_prob=0.5):
         # Prevent the gradient from flowing through the policy
-        if forward:
-            causal_rep = self.get_causal_rep_from_img(x, forward).detach()
-        else:
-            causal_rep = self.get_causal_rep_from_img(raw_x, forward).detach()
+        # if loaded_causal is not None:
+        #     causal_rep = loaded_causal.detach()
+        #     # flat_rep = torch.flatten(causal_rep, start_dim=1)
+        #     # print(flat_rep.shape)
+        #     action_mean = self.actor_mean(causal_rep)
+        # else:
+        causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
@@ -223,12 +228,14 @@ class Agent(nn.Module):
         action = utils.mask_actions(action, current_step=current_step,
                                     training_size=training_size, dropout_prob=dropout_prob)
 
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x), causal_rep
 
 
 if __name__ == "__main__":
-    profiler = cProfile.Profile()
-    profiler.enable()
+    # PROFILER
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -324,6 +331,7 @@ if __name__ == "__main__":
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     causal_reps = torch.zeros((args.num_steps, args.num_envs) + CAUSAL_OBSERVATION.shape).to(device)
+    causal_reps = torch.flatten(causal_reps, start_dim=1)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -370,10 +378,11 @@ if __name__ == "__main__":
             dones[step] = next_done
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                action, logprob, _, value, causal_rep = agent.get_action_and_value(x=next_obs, current_step=global_step,
                                                                        training_size=args.total_timesteps,
                                                                        dropout_prob=args_citris.dropout_update)
                 values[step] = value.flatten()
+                causal_reps[step] = causal_rep
             actions[step] = action
             logprobs[step] = logprob
 
@@ -435,14 +444,15 @@ if __name__ == "__main__":
                 # EVERY LOOP IS A MINIBATCH OF 32
                 # end = start + args.minibatch_size
                 # mb_inds = b_inds[start:end]
-                unflattened_obs = datasets.get_imgs(mb_inds)
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
-                                                                              raw_x=unflattened_obs,
-                                                                              current_step=global_step,
-                                                                              training_size=args.total_timesteps,
-                                                                              forward=False,
-                                                                              action=b_actions[mb_inds],
-                                                                              dropout_prob=args_citris.dropout_update)
+                unflattened_obs = datasets['train'].get_imgs(mb_inds)
+                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(x=b_obs[mb_inds],
+                                                                                 raw_x=unflattened_obs,
+                                                                                 current_step=global_step,
+                                                                                 training_size=args.total_timesteps,
+                                                                                 forward=False,
+                                                                                 loaded_causal=causal_reps[mb_inds],
+                                                                                 action=b_actions[mb_inds],
+                                                                                 dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -517,10 +527,11 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        profiler.disable()
-        stats = pstats.Stats(profiler).sort_stats('tottime')
-        stats.print_stats()
-        test = 0
+        # PROFILING
+        # profiler.disable()
+        # stats = pstats.Stats(profiler).sort_stats('tottime')
+        # stats.print_stats()
+        # test = 0
 
         # TODO: Improve efficiency, most costly calls are: --> get_action_and_value, encoder_decoder.py(forward)
         #  get_causal_rep_from_img, get_causal_rep, custom_env_wrapper (observations), get_value
