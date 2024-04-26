@@ -33,11 +33,12 @@ class BaseDataset(data.Dataset):
 
     CAUSAL_VAR_NAMES = ['base', 'root']
 
-    def __init__(self, data_folder, interventions, split='train', single_image=False, seq_len=2, **kwargs):
+    def __init__(self, data_folder, img_data, interventions, split='train', single_image=False, seq_len=2, **kwargs):
         super().__init__()
-        image_path = data_folder + 'images.npz'
-        # target_path = data_folder + 'intervention.npz'
-        self.imgs = torch.from_numpy(np.load(image_path)['entries'])
+        # image_path = data_folder + 'images.npz'
+        # # # target_path = data_folder + 'intervention.npz'
+        # self.imgs_old = torch.from_numpy(np.load(image_path)['entries'])
+        self.imgs = img_data
         # self.targets = torch.from_numpy(np.load(target_path)['entries'])
         self.targets = interventions
 
@@ -57,7 +58,8 @@ class BaseDataset(data.Dataset):
         if len(self.imgs.shape) == 5:
             self.imgs = self.imgs.permute(0, 1, 4, 2, 3)  # Push channels to PyTorch dimension
         else:
-            self.imgs = self.imgs.permute(0, 3, 1, 2)
+            pass
+            # self.imgs = self.imgs.permute(0, 3, 1, 2)
 
         self.target_names = ReacherDataset.CAUSAL_VAR_NAMES
         # print(f'Using the causal variables {self.target_names}')

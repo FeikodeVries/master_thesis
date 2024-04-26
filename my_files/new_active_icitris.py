@@ -161,14 +161,9 @@ class iCITRIS(nn.Module):
 
     def get_loss(self, batch, target, global_step, final_epoch, writer, epoch):
         """ Main training method for calculating the loss """
-        # TODO: interventions are all 0?
         imgs = batch.cuda()
         target = target.cuda().flatten(0, 1)
         labels = imgs
-
-        # TODO: Seems that the dimensions of the target are different than the default version due to being inherited,
-        #   Check if this flattening is okay
-        # TODO: MI_estimator is returning NAN --> find out why
 
         # En- and decode every element
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
@@ -218,15 +213,15 @@ class iCITRIS(nn.Module):
 
         return loss, logging
 
-    def get_causal_rep(self, img):
+    def get_causal_rep(self, x):
         """
         Encode an image to latent space, retrieve the current latent to causal assignment and apply it to get the
         minimal causal variables
-        :param img:
+        :param x: batch of unflattened image tensors
         :return:
         """
-        # TODO: Check if this works
-        z_mean, z_logstd = self.encoder(img)
+        # TODO: Change this to take an image batch
+        z_mean, z_logstd = self.encoder(x)
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars in binary
         target_assignment = self.prior.get_target_assignment(hard=True)

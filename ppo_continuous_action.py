@@ -22,7 +22,7 @@ from gymnasium import spaces
 from tqdm.auto import tqdm
 
 import torchvision.transforms as T
-from my_files.datahandling import load_datasets, load_data_new
+from my_files.datahandling import load_data_new
 import my_files.datahandling as dh
 from my_files.active_icitris import active_iCITRISVAE
 from my_files.new_active_icitris import iCITRIS
@@ -61,7 +61,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 50000
+    total_timesteps: int = 500000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -158,23 +158,12 @@ class Agent(nn.Module):
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
-        # self.causal_model = active_iCITRISVAE(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
-        #                                       lr=args_citris.lr, num_causal_vars=args_citris.num_causal_vars,
-        #                                       run_name=run_name, counter=0)
         self.causal_model = iCITRIS(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
                                     num_causal_vars=args_citris.num_causal_vars, run_name=run_name,
                                     lambda_sparse=args_citris.lambda_sparse, act_fn=args_citris.act_fn,
                                     beta_classifier=args_citris.beta_classifier,
                                     beta_mi_estimator=args_citris.beta_mi_estimator,
                                     beta_t1=args_citris.beta_t1, autoregressive_prior=args_citris.autoregressive_prior)
-
-    def update_causal_model(self):
-        # Use pretrained model
-        root_dir = str(pathlib.Path(__file__).resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
-        pretrained_filename = root_dir + 'last.ckpt'
-        # Update stored model with new model
-        if os.path.isfile(pretrained_filename):
-            self.causal_model = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
 
     def get_causal_rep_from_img(self, x):
         """
@@ -183,12 +172,13 @@ class Agent(nn.Module):
         """
         final_processed = None
         for i, j in enumerate(x):
-            img = self.unflatten_and_process(j)
-            causal_rep = self.causal_model.get_causal_rep(img)
-            causal_rep_flat = torch.flatten(causal_rep)[None, :]
-            final_processed = causal_rep_flat if final_processed is None else torch.cat((final_processed, causal_rep_flat))
+            processed = self.unflatten_and_process(j)
+            final_processed = processed if final_processed is None else torch.cat((final_processed, processed))
 
-        return final_processed
+        causal_rep = self.causal_model.get_causal_rep(final_processed)
+        causal_rep = torch.flatten(causal_rep)[None, :]
+
+        return causal_rep
 
     def unflatten_and_process(self, x):
         """
@@ -206,18 +196,10 @@ class Agent(nn.Module):
 
     def get_value(self, x):
         causal_rep = self.get_causal_rep_from_img(x)
-        # causal_rep = torch.flatten(causal_rep)[None, :]
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, raw_x=None, loaded_causal=None, forward=True,
-                             action=None, dropout_prob=0.5):
+    def get_action_and_value(self, x, current_step, training_size, action=None, dropout_prob=0.5):
         # Prevent the gradient from flowing through the policy
-        # if loaded_causal is not None:
-        #     causal_rep = loaded_causal.detach()
-        #     # flat_rep = torch.flatten(causal_rep, start_dim=1)
-        #     # print(flat_rep.shape)
-        #     action_mean = self.actor_mean(causal_rep)
-        # else:
         causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
@@ -228,14 +210,12 @@ class Agent(nn.Module):
         action = utils.mask_actions(action, current_step=current_step,
                                     training_size=training_size, dropout_prob=dropout_prob)
 
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x), causal_rep
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
 
 
 if __name__ == "__main__":
-    # PROFILER
     # profiler = cProfile.Profile()
     # profiler.enable()
-
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -258,13 +238,13 @@ if __name__ == "__main__":
     # MYCODE
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=32)
+    parser.add_argument('--c_hid', type=int, default=12)                # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--pretraining_size', type=float, default=0)
     parser.add_argument('--dropout_pretraining', type=float, default=0.7)
-    parser.add_argument('--dropout_update', type=float, default=0.1)
-    parser.add_argument('--decoder_num_blocks', type=int, default=1)
+    parser.add_argument('--dropout_update', type=float, default=0.1)    # TODO: Optimise hyperparam
+    parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=32)
+    parser.add_argument('--num_latents', type=int, default=12)          # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -330,8 +310,7 @@ if __name__ == "__main__":
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
-    causal_reps = torch.zeros((args.num_steps, args.num_envs) + CAUSAL_OBSERVATION.shape).to(device)
-    causal_reps = torch.flatten(causal_reps, start_dim=1)
+    # causal_reps = torch.zeros((args.num_steps, args.num_envs) + CAUSAL_OBSERVATION.shape).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -378,11 +357,10 @@ if __name__ == "__main__":
             dones[step] = next_done
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value, causal_rep = agent.get_action_and_value(x=next_obs, current_step=global_step,
+                action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
                                                                        training_size=args.total_timesteps,
                                                                        dropout_prob=args_citris.dropout_update)
                 values[step] = value.flatten()
-                causal_reps[step] = causal_rep
             actions[step] = action
             logprobs[step] = logprob
 
@@ -425,8 +403,13 @@ if __name__ == "__main__":
 
         # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
         interventions = torch.where(actions != 0, 1.0, 0.0)
+        unflatten_obs = None
+        for ob in obs:
+            processed = agent.unflatten_and_process(ob)
+            unflatten_obs = processed if unflatten_obs is None else torch.concat((unflatten_obs, processed))
 
-        datasets, data_loaders, data_name = load_data_new(args_citris, interventions=interventions, env_name='Walker')
+        datasets, data_loaders, data_name = load_data_new(args_citris, img_data=unflatten_obs,
+                                                          interventions=interventions, env_name='Walker')
 
         # Optimizing the policy and value network
         # b_inds = np.arange(args.batch_size)
@@ -444,15 +427,11 @@ if __name__ == "__main__":
                 # EVERY LOOP IS A MINIBATCH OF 32
                 # end = start + args.minibatch_size
                 # mb_inds = b_inds[start:end]
-                unflattened_obs = datasets['train'].get_imgs(mb_inds)
-                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(x=b_obs[mb_inds],
-                                                                                 raw_x=unflattened_obs,
-                                                                                 current_step=global_step,
-                                                                                 training_size=args.total_timesteps,
-                                                                                 forward=False,
-                                                                                 loaded_causal=causal_reps[mb_inds],
-                                                                                 action=b_actions[mb_inds],
-                                                                                 dropout_prob=args_citris.dropout_update)
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
+                                                                              current_step=global_step,
+                                                                              training_size=args.total_timesteps,
+                                                                              action=b_actions[mb_inds],
+                                                                              dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -527,7 +506,6 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-        # PROFILING
         # profiler.disable()
         # stats = pstats.Stats(profiler).sort_stats('tottime')
         # stats.print_stats()

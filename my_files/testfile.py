@@ -79,3 +79,25 @@ for i, j in enumerate(x):
 #     # agent.update_causal_model()
 #     # path = pathlib.Path(__file__).parent.resolve()
 #     # last_loss = torch.load(f'{path}/my_files/data/last_loss.pt')
+
+# def update_causal_model(self):
+#     # Use pretrained model
+#     root_dir = str(pathlib.Path(__file__).resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'
+#     pretrained_filename = root_dir + 'last.ckpt'
+#     # Update stored model with new model
+#     if os.path.isfile(pretrained_filename):
+#         self.causal_model = active_iCITRISVAE.load_from_checkpoint(pretrained_filename)
+
+# # if self.causal:
+# if self.t < self.batch_size:
+#     if len(self.observations) == 0:
+#         self.observations = np.array([pixel_observation['pixels']], dtype=np.float32)
+#     else:
+#         self.observations = np.concatenate((self.observations,
+#                                             np.array([pixel_observation['pixels']])), axis=0,
+#                                            dtype=np.float32)
+# elif self.batch_size == self.t:
+#     self.datahandling.batch_update_npz(self.observations)
+#     self.observations = []
+#     self.t = 0
+# self.t += 1
