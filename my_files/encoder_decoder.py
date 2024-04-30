@@ -11,7 +11,7 @@ class Encoder(nn.Module):
     We use a stack of convolutions with strides in every second convolution to reduce
     dimensionality. For the datasets in question, the network showed to be sufficient.
     """
-
+    # TODO: If num_layers is not processed with image width, the system will crash due to mismatching shapes
     def __init__(self, c_hid, num_latents,
                  c_in=3,
                  width=32,

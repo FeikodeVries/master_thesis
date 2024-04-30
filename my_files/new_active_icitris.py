@@ -22,7 +22,7 @@ class iCITRIS(nn.Module):
     def __init__(self, c_hid, num_latents,
                  num_causal_vars,
                  run_name,
-                 img_width=64,
+                 width=64,
                  graph_learning_method="ENCO",
                  c_in=3,
                  lambda_sparse=0.0,
@@ -51,8 +51,8 @@ class iCITRIS(nn.Module):
         max_iters : int
                     Number of max. training iterations. Needed for
                     cosine annealing of the learning rate.
-        img_width : int
-                    Width of the input image (assumed to be equal to height)
+        width : int
+                    Width to be used in calculating the number of convolutional blocks with int(np.log2(width) - 2)
         graph_learning_method : str
                                 Which graph learning method to use in the prior.
                                 Options: ENCO, NOTEARS
@@ -99,13 +99,13 @@ class iCITRIS(nn.Module):
         self.encoder = coding.Encoder(num_latents=num_latents,
                                       c_hid=c_hid,
                                       c_in=c_in,
-                                      width=img_width,
+                                      width=width,
                                       act_fn=act_fn_func,
                                       variational=True)
         self.decoder = coding.Decoder(num_latents=num_latents,
                                       c_hid=c_hid,
                                       c_out=c_in,
-                                      width=img_width,
+                                      width=width,
                                       num_blocks=1,
                                       act_fn=act_fn_func)
         # Prior
@@ -159,7 +159,7 @@ class iCITRIS(nn.Module):
     def decode(self, z_sample):
         return self.decoder(z_sample)
 
-    def get_loss(self, batch, target, global_step, final_epoch, writer, epoch):
+    def get_loss(self, batch, target, global_step):
         """ Main training method for calculating the loss """
         imgs = batch.cuda()
         target = target.cuda().flatten(0, 1)
@@ -220,7 +220,6 @@ class iCITRIS(nn.Module):
         :param x: batch of unflattened image tensors
         :return:
         """
-        # TODO: Change this to take an image batch
         z_mean, z_logstd = self.encoder(x)
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars in binary
@@ -229,6 +228,20 @@ class iCITRIS(nn.Module):
         latent_causal_assignment = target_assignment * z_sample[0][:, None]
 
         return latent_causal_assignment
+
+    def set_train(self, training=True):
+        if training:
+            self.encoder.train()
+            self.decoder.train()
+            self.intv_classifier.train()
+            self.prior.train()
+            self.mi_estimator.train()
+        else:
+            self.encoder.eval()
+            self.decoder.eval()
+            self.intv_classifier.eval()
+            self.prior.eval()
+            self.mi_estimator.eval()
 
     def get_params(self):
         """

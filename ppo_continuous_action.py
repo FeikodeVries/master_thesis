@@ -13,23 +13,14 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
-import cv2
-import scipy.misc
-from torchvision.utils import make_grid
-from my_files import custom_env_wrappers as mywrapper
 import pytorch_lightning as pl
 from gymnasium import spaces
-from tqdm.auto import tqdm
 
-import torchvision.transforms as T
 from my_files.datahandling import load_data_new
 import my_files.datahandling as dh
-from my_files.active_icitris import active_iCITRISVAE
 from my_files.new_active_icitris import iCITRIS
 from my_files import custom_env_wrappers as mywrapper
-from my_files.datasets import ReacherDataset
 import my_files.utils as utils
-import matplotlib.pyplot as plt
 
 @dataclass
 class Args:
@@ -61,9 +52,9 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "Walker2d-v4"
     """the id of the environment"""
-    total_timesteps: int = 500000
+    total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4
+    learning_rate: float = 3e-4  # TODO: Default is 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
@@ -75,7 +66,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
+    num_minibatches: int = 128  # TODO: Default(32) Could be that the running average from BatchNorm is unstable due to very small minibatches?
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -104,9 +95,10 @@ class Args:
 
 
 UNFLATTEN_SPACE = None
+IMG_SIZE = 64
 
 
-def make_env(env_id, idx, capture_video, run_name, num_latents, num_causal, gamma, batch_size=100):
+def make_env(env_id, idx, capture_video, run_name, gamma):
     def thunk():
         global UNFLATTEN_SPACE
         if capture_video and idx == 0:
@@ -117,8 +109,7 @@ def make_env(env_id, idx, capture_video, run_name, num_latents, num_causal, gamm
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.CausalWrapper(env, shape=64, rgb=True, batch_size=batch_size, latents=num_latents,
-                                      causal_vars=num_causal, causal=True)
+        env = mywrapper.CausalWrapper(env, shape=IMG_SIZE, rgb=True)
         UNFLATTEN_SPACE = env.observation_space
         env = gym.wrappers.FlattenObservation(env)
 
@@ -155,10 +146,11 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
-        self.causal_model = iCITRIS(c_hid=args_citris.c_hid, num_latents=args_citris.num_latents,
+        #
+        self.causal_model = iCITRIS(c_hid=args_citris.c_hid, width=IMG_SIZE,  num_latents=args_citris.num_latents,
                                     num_causal_vars=args_citris.num_causal_vars, run_name=run_name,
                                     lambda_sparse=args_citris.lambda_sparse, act_fn=args_citris.act_fn,
                                     beta_classifier=args_citris.beta_classifier,
@@ -198,7 +190,7 @@ class Agent(nn.Module):
         causal_rep = self.get_causal_rep_from_img(x)
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, action=None, dropout_prob=0.5):
+    def get_action_and_value(self, x, current_step, training_size, action=None, dropout_prob=0.1):
         # Prevent the gradient from flowing through the policy
         causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
@@ -207,8 +199,7 @@ class Agent(nn.Module):
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        action = utils.mask_actions(action, current_step=current_step,
-                                    training_size=training_size, dropout_prob=dropout_prob)
+        action = utils.mask_actions(action, dropout_prob=dropout_prob)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
 
@@ -238,13 +229,13 @@ if __name__ == "__main__":
     # MYCODE
     parser = utils.get_default_parser()
     parser.add_argument('--model', type=str, default='active_iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=12)                # TODO: Optimise hyperparam --> Default: 32
+    parser.add_argument('--c_hid', type=int, default=32)                # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--pretraining_size', type=float, default=0)
     parser.add_argument('--dropout_pretraining', type=float, default=0.7)
-    parser.add_argument('--dropout_update', type=float, default=0.1)    # TODO: Optimise hyperparam
+    parser.add_argument('--dropout_update', type=float, default=0.01)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=12)          # TODO: Optimise hyperparam --> Default: 32
+    parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -288,9 +279,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args_citris.num_latents, args_citris.num_causal_vars,
-                  args.gamma, batch_size=args.num_steps) for i in range(args.num_envs)]
-    )
+        [make_env(args.env_id, i, args.capture_video, run_name,args.gamma) for i in range(args.num_envs)])
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     agent = Agent(envs).to(device)
@@ -351,6 +340,7 @@ if __name__ == "__main__":
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
+
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
@@ -377,6 +367,7 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
+        agent.causal_model.set_train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -409,24 +400,18 @@ if __name__ == "__main__":
             unflatten_obs = processed if unflatten_obs is None else torch.concat((unflatten_obs, processed))
 
         datasets, data_loaders, data_name = load_data_new(args_citris, img_data=unflatten_obs,
-                                                          interventions=interventions, env_name='Walker')
+                                                          interventions=interventions, env_name=args.env_id)
 
         # Optimizing the policy and value network
-        # b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
             print(f'UPDATE EPOCH {epoch}')
-            # np.random.shuffle(b_inds)
             # TODO: Test if the shuffled datapoints cause issues
             for x in data_loaders['train']:
                 img_pairs = x[0]
                 targets = x[1]
                 mb_inds = np.array(x[2])
 
-                # for start in range(0, args.batch_size, args.minibatch_size):
-                # EVERY LOOP IS A MINIBATCH OF 32
-                # end = start + args.minibatch_size
-                # mb_inds = b_inds[start:end]
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               current_step=global_step,
                                                                               training_size=args.total_timesteps,
@@ -470,12 +455,11 @@ if __name__ == "__main__":
                 # Calculate citris loss
                 citris_loss, citris_logs = agent.causal_model.get_loss(batch=img_pairs,
                                                                        target=targets,
-                                                                       global_step=global_step,
-                                                                       writer=writer,
-                                                                       epoch=epoch,
-                                                                       final_epoch=args.update_epochs)
+                                                                       global_step=global_step)
 
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
+
+                agent.causal_model.set_train(training=True)
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
@@ -510,9 +494,6 @@ if __name__ == "__main__":
         # stats = pstats.Stats(profiler).sort_stats('tottime')
         # stats.print_stats()
         # test = 0
-
-        # TODO: Improve efficiency, most costly calls are: --> get_action_and_value, encoder_decoder.py(forward)
-        #  get_causal_rep_from_img, get_causal_rep, custom_env_wrapper (observations), get_value
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

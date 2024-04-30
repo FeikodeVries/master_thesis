@@ -578,7 +578,7 @@ def get_default_parser():
     parser.add_argument('--coarse_vars', action='store_true')
     parser.add_argument('--data_img_width', type=int, default=-1)
     parser.add_argument('--seq_len', type=int, default=2)
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--lr', type=float, default=3e-4)  # TODO: Tune for better results --> Default: 1e-5
     parser.add_argument('--warmup', type=int, default=100)
     parser.add_argument('--imperfect_interventions', action='store_true')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=-1)
@@ -616,7 +616,7 @@ def gaussian_log_prob(mean, log_std, samples):
     return - log_std - 0.5 * np.log(2*np.pi) - 0.5 * ((samples - mean) / log_std.exp())**2
 
 
-def mask_actions(actions, current_step, training_size, dropout_prob=0.5):
+def mask_actions(actions, dropout_prob=0.1):
     # Decrease probability of masking out over training
     # Mask actions
     mask = np.random.choice([0, 1], actions.shape, p=[dropout_prob, 1-dropout_prob])

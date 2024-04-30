@@ -35,11 +35,7 @@ class BaseDataset(data.Dataset):
 
     def __init__(self, data_folder, img_data, interventions, split='train', single_image=False, seq_len=2, **kwargs):
         super().__init__()
-        # image_path = data_folder + 'images.npz'
-        # # # target_path = data_folder + 'intervention.npz'
-        # self.imgs_old = torch.from_numpy(np.load(image_path)['entries'])
         self.imgs = img_data
-        # self.targets = torch.from_numpy(np.load(target_path)['entries'])
         self.targets = interventions
 
         self._clean_up_data()
@@ -133,6 +129,38 @@ class ReacherDataset(BaseDataset):
     })
 
     CAUSAL_VAR_NAMES = ['base', 'root']
+
+
+class PendulumDataset(BaseDataset):
+    VAR_INFO = OrderedDict({
+        'cart_pos': 'continuous',
+        'cart_vel': 'continuous',
+        'pole_angle': 'continuous',
+        'pole_vel': 'continuous'
+    })
+
+    CAUSAL_VAR_NAMES = ['pole', 'cart']
+
+
+class CheetahDataset(BaseDataset):
+    VAR_INFO = OrderedDict({
+        'root_vel_angle': 'continuous',
+        'back_thigh_angle': 'continuous',
+        'back_thigh_vel': 'continuous',
+        'back_shin_angle': 'continuous',
+        'back_shin_vel': 'continuous',
+        'back_foot_angle': 'continuous',
+        'back_foot_vel': 'continuous',
+        'front_thigh_angle': 'continuous',
+        'front_thigh_vel': 'continuous',
+        'front_shin_angle': 'continuous',
+        'front_shin_vel': 'continuous',
+        'front_foot_angle': 'continuous',
+        'front_foot_vel': 'continuous'
+    })
+
+    CAUSAL_VAR_NAMES = ['back_foot', 'back_shin', 'back_thigh',
+                        'front_foot', 'front_shin', 'front_thigh']
 
 
 class WalkerDataset(BaseDataset):

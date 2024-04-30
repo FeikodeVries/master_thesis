@@ -39,11 +39,7 @@ class CausalWrapper(gym.ObservationWrapper):
         render_kwargs: Optional[Dict[str, Dict[str, Any]]] = None,
         pixel_keys: Tuple[str, ...] = ("pixels",),
         rgb: bool = False,
-        keep_dim: bool = False,
-        batch_size: int = 200,
-        causal: bool = True,
-        latents: int = 32,
-        causal_vars: int = 6
+        keep_dim: bool = False
     ):
         """Initializes a new pixel Wrapper.
 
@@ -78,17 +74,6 @@ class CausalWrapper(gym.ObservationWrapper):
         self.keep_dim = keep_dim
         self.shape = tuple(shape)
         self.rgb = rgb
-
-        # Updating the VAE
-        self.batch_size = batch_size
-        self.t = 0
-        self.causal = causal
-        # Data handling
-        self.datahandling = dh.DataHandling()
-        self.observations = []
-        self.causal_vars = causal_vars
-        self.num_latents = latents
-        # END MYCODE
 
         # Avoid side-effects that occur when render_kwargs is manipulated
         render_kwargs = copy.deepcopy(render_kwargs)
@@ -162,11 +147,6 @@ class CausalWrapper(gym.ObservationWrapper):
                 raise TypeError(pixels.dtype)
 
             # START MYCODE
-            # Convert observation to grayscale and resize
-            # if self.causal:
-            #     pixels_space = spaces.Box(shape=(self.citris.hparams.num_latents, self.citris.hparams.num_causal_vars),
-            #                               low=-float("inf"), high=float("inf"), dtype=np.float32)
-            # # else:
             if self.rgb:
                 pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 3),
                                           low=low, high=high, dtype=pixels.dtype)
@@ -241,57 +221,4 @@ class CausalWrapper(gym.ObservationWrapper):
         if isinstance(render, list):
             self.render_history += render
         return render
-
-
-class ActionWrapper(gym.ActionWrapper):
-    """Superclass of wrappers that can modify the action before :meth:`env.step`.
-
-    If you would like to apply a function to the action before passing it to the base environment,
-    you can simply inherit from :class:`ActionWrapper` and overwrite the method :meth:`action` to implement
-    that transformation. The transformation defined in that method must take values in the base environment’s
-    action space. However, its domain might differ from the original action space.
-    In that case, you need to specify the new action space of the wrapper by setting :attr:`self.action_space` in
-    the :meth:`__init__` method of your wrapper.
-
-    Among others, Gymnasium provides the action wrappers :class:`ClipAction` and :class:`RescaleAction` for clipping and rescaling actions.
-    """
-
-    def __init__(self, env, batch_size, causal):
-        """Constructor for the action wrapper."""
-        super().__init__(env)
-        self.dh = dh.DataHandling()
-        self.batch_size = batch_size
-        self.t = 0
-        self.actions = []
-        self.causal = causal
-
-    def action(self, action):
-        """
-        Returns a modified action before :meth:`env.step` is called.
-        :param action: The original :meth:`step` actions:
-        :returns: The modified actions
-        """
-        # if self.causal:
-        #     self.t += 1
-        #     if self.t < self.batch_size:
-        #         # Convert action to intervention
-        #         intervention = (np.absolute(action) > 0).astype(int)
-        #         if len(self.actions) == 0:
-        #             self.actions = np.array(np.array([intervention], dtype=np.float32))
-        #         else:
-        #             self.actions = np.concatenate((self.actions, np.array([intervention])), axis=0, dtype=np.float32)
-        #     elif self.batch_size == self.t:
-        #         self.dh.batch_update_npz(self.actions, filename='intervention')
-        #         self.actions = []
-        #         self.t = 0
-        return action
-
-
-class RewardWrapper(gym.RewardWrapper):
-    def __init__(self, env, func):
-        super().__init__(env)
-        self.func = func
-
-    def reward(self, reward):
-        return self.func(reward)
 

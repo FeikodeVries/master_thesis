@@ -5,7 +5,7 @@ import torch
 import pytorch_lightning as pl
 
 import torch.utils.data as data
-from cleanrl.my_files.datasets import ReacherDataset, WalkerDataset
+from cleanrl.my_files.datasets import ReacherDataset, WalkerDataset, PendulumDataset, CheetahDataset
 
 
 class DataHandling:
@@ -83,14 +83,24 @@ class DataHandling:
 
 def load_data_new(args, img_data, interventions, env_name):
     print('Loading data...')
-
+    env_name = env_name.split('-')[0]
     # Extend for different models
     if env_name == 'Reacher':
         DataClass = ReacherDataset
         dataset_args = {}
         test_args = lambda train_set: {'causal_vars': train_set.target_names}
-    elif env_name == 'Walker':
+    elif env_name == 'Walker2d':
         DataClass = WalkerDataset
+        dataset_args = {}
+        test_args = lambda train_set: {'causal_vars': train_set.target_names}
+    elif env_name == 'InvertedPendulum':
+        # TODO: Sizes of tensors not matching?
+        DataClass = PendulumDataset
+        dataset_args = {}
+        test_args = lambda train_set: {'causal_vars': train_set.target_names}
+    elif env_name == 'HalfCheetah':
+        # TODO: far less often doing print statements for performance??
+        DataClass = CheetahDataset
         dataset_args = {}
         test_args = lambda train_set: {'causal_vars': train_set.target_names}
     else:

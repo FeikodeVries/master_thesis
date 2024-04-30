@@ -1,9 +1,11 @@
-import torch
-
-x = torch.rand((2, 12288))
-
-for i, j in enumerate(x):
-    print(j.shape)
+# import torch
+#
+# x = torch.rand((2, 12288))
+#
+# for i, j in enumerate(x):
+#     print(j.shape)
+test = 'Reacher-v4'
+print(test.split('-'[0]))
 
 
 # NON FUNCTIONAL BUT USEFUL RESUME TRAINING CODE
