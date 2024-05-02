@@ -22,6 +22,7 @@ from my_files.new_active_icitris import iCITRIS
 from my_files import custom_env_wrappers as mywrapper
 import my_files.utils as utils
 
+
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -66,7 +67,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 128  # TODO: Default(32) Could be that the running average from BatchNorm is unstable due to very small minibatches?
+    num_minibatches: int = 32  # TODO: Default(32) Could be that the running average from BatchNorm is unstable due to very small minibatches?
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -76,7 +77,7 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0
+    ent_coef: float = 0.0  # TODO: See if this could help
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -95,7 +96,7 @@ class Args:
 
 
 UNFLATTEN_SPACE = None
-IMG_SIZE = 64
+IMG_SIZE = 64   # TODO: Can only be doubled or halved, any other change will instantly crash the system
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -134,22 +135,47 @@ class Agent(nn.Module):
     """
     def __init__(self, envs):
         super().__init__()
+        # self.critic = nn.Sequential(
+        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, 1), std=1.0),
+        # )
+        # self.actor_mean = nn.Sequential(
+        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, 64)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1),
+        # )
+
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
-            nn.Tanh(),
+            layer_init(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, padding=1)),
+            nn.LeakyReLU(inplace=True),
+            layer_init(nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, padding=1)),
+            nn.LeakyReLU(inplace=True),
+            nn.Flatten(),
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()*16, 64)),
+            nn.ReLU(inplace=True),
             layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            nn.ReLU(inplace=True),
+            layer_init(nn.Linear(64, 1), std=1.0)
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
-            nn.Tanh(),
+            layer_init(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, padding=1)),
+            nn.LeakyReLU(inplace=True),
+            layer_init(nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, padding=1)),
+            nn.LeakyReLU(inplace=True),
+            nn.Flatten(),
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()*16, 64)),
+            nn.ReLU(inplace=True),
             layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1),
+            nn.ReLU(inplace=True),
+            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1)
         )
+
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
-        #
         self.causal_model = iCITRIS(c_hid=args_citris.c_hid, width=IMG_SIZE,  num_latents=args_citris.num_latents,
                                     num_causal_vars=args_citris.num_causal_vars, run_name=run_name,
                                     lambda_sparse=args_citris.lambda_sparse, act_fn=args_citris.act_fn,
@@ -168,9 +194,9 @@ class Agent(nn.Module):
             final_processed = processed if final_processed is None else torch.cat((final_processed, processed))
 
         causal_rep = self.causal_model.get_causal_rep(final_processed)
-        causal_rep = torch.flatten(causal_rep)[None, :]
+        # causal_rep = torch.flatten(causal_rep)[None, :]
 
-        return causal_rep
+        return causal_rep[None, None, :]
 
     def unflatten_and_process(self, x):
         """
@@ -190,7 +216,7 @@ class Agent(nn.Module):
         causal_rep = self.get_causal_rep_from_img(x)
         return self.critic(causal_rep)
 
-    def get_action_and_value(self, x, current_step, training_size, action=None, dropout_prob=0.1):
+    def get_action_and_value(self, x, action=None, dropout_prob=0.1):
         # Prevent the gradient from flowing through the policy
         causal_rep = self.get_causal_rep_from_img(x).detach()
         action_mean = self.actor_mean(causal_rep)
@@ -232,7 +258,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_hid', type=int, default=32)                # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--pretraining_size', type=float, default=0)
     parser.add_argument('--dropout_pretraining', type=float, default=0.7)
-    parser.add_argument('--dropout_update', type=float, default=0.01)    # TODO: Optimise hyperparam (default: .1)
+    parser.add_argument('--dropout_update', type=float, default=0.1)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
     parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
@@ -347,8 +373,7 @@ if __name__ == "__main__":
             dones[step] = next_done
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(x=next_obs, current_step=global_step,
-                                                                       training_size=args.total_timesteps,
+                action, logprob, _, value = agent.get_action_and_value(x=next_obs,
                                                                        dropout_prob=args_citris.dropout_update)
                 values[step] = value.flatten()
             actions[step] = action
@@ -413,8 +438,6 @@ if __name__ == "__main__":
                 mb_inds = np.array(x[2])
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
-                                                                              current_step=global_step,
-                                                                              training_size=args.total_timesteps,
                                                                               action=b_actions[mb_inds],
                                                                               dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]

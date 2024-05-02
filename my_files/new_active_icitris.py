@@ -223,7 +223,8 @@ class iCITRIS(nn.Module):
         z_mean, z_logstd = self.encoder(x)
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars in binary
-        target_assignment = self.prior.get_target_assignment(hard=True)
+        # TODO: Move the latent assignment from binary to probability and test that for training
+        target_assignment = self.prior.get_target_assignment(hard=False)
         # Assign latent vals to their respective causal var
         latent_causal_assignment = target_assignment * z_sample[0][:, None]
 

@@ -61,11 +61,12 @@ class BaseDataset(data.Dataset):
         # print(f'Using the causal variables {self.target_names}')
 
     def _prepare_imgs(self, imgs):
+        # TODO: Disabling the multiplication should preserve the original image colour
         if self.encodings_active:
             return imgs
         else:
             imgs = imgs.float() / 255.0
-            imgs = imgs * 2.0 - 1.0
+            # imgs = imgs * 2.0 - 1.0
             return imgs
 
     def load_encodings(self, filename):
