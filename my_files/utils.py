@@ -7,6 +7,7 @@ import torch.optim as optim
 import numpy as np
 import pytorch_lightning as pl
 import pathlib
+import random
 
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -578,7 +579,7 @@ def get_default_parser():
     parser.add_argument('--coarse_vars', action='store_true')
     parser.add_argument('--data_img_width', type=int, default=-1)
     parser.add_argument('--seq_len', type=int, default=3)
-    parser.add_argument('--lr', type=float, default=5e-5)  # TODO: Tune for better results --> Default: 1e-5
+    parser.add_argument('--lr', type=float, default=1e-4)  # TODO: Tune for better results --> Default: 1e-5
     parser.add_argument('--warmup', type=int, default=100)
     parser.add_argument('--imperfect_interventions', action='store_true')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=-1)
@@ -620,6 +621,9 @@ def mask_actions(actions, dropout_prob=0.1):
     # Decrease probability of masking out over training
     # Mask actions
     mask = np.random.choice([0, 1], actions.shape, p=[dropout_prob, 1-dropout_prob])
+    guaranteed_action = random.randint(0, actions.shape[1]-1)
+    # TODO: Set a value to be guaranteed to be taken. So there will never be a tensor without any actions
+    mask[0][guaranteed_action] = 1
     if isinstance(actions, np.ndarray):
         masked_actions = np.multiply(actions, mask)
         return masked_actions

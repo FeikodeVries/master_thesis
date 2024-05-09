@@ -6,19 +6,25 @@
 #     print(j.shape)
 import torch
 from collections import defaultdict
-from statistics import mean
-test1 = {'a': 1, 'b':2}
-test2 = {'a': 3, 'b':4}
+# from statistics import mean
+# test1 = {'a': 1, 'b':2}
+# test2 = {'a': 3, 'b':4}
+#
+# ds = [test1, test2]
+# d = {}
+# for k in test1.keys():
+#   d[k] = list(d[k] for d in ds)
+#
+# for k in test1.keys():
+#     d[k] = mean(d[k])
+#
+# print(d)
+from torch.distributions.normal import Normal
 
-ds = [test1, test2]
-d = {}
-for k in test1.keys():
-  d[k] = list(d[k] for d in ds)
+probs = Normal(-1, 1)
+action = torch.tensor([0, 0, 0, 0, 0, 0])
+probs.log_prob(action).sum(1)
 
-for k in test1.keys():
-    d[k] = mean(d[k])
-
-print(d)
 # NON FUNCTIONAL BUT USEFUL RESUME TRAINING CODE
 # if args_citris.resume_training:
 #     root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/my_files/data/model_checkpoints/active_iCITRIS/'

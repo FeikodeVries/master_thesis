@@ -165,7 +165,7 @@ class iCITRIS(nn.Module):
         imgs = batch.cuda()
         target = target.cuda().flatten(0, 1)
         labels = imgs
-
+        # TODO: See how the input to the decoder looks
         # En- and decode every element
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
@@ -235,7 +235,7 @@ class iCITRIS(nn.Module):
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars in binary
         # TODO: Move the latent assignment from binary to probability and test that for training
-        target_assignment = self.prior.get_target_assignment(hard=True)
+        target_assignment = self.prior.get_target_assignment(hard=False)
         # Assign latent vals to their respective causal var
         latent_causal_assignment = [target_assignment * z_sample[i][:, None] for i in range(len(z_sample))]
         latent_causal_assignment = torch.stack(latent_causal_assignment, dim=0)

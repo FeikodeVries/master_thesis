@@ -55,11 +55,11 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 5e-5  # TODO: Default is 3e-4
+    learning_rate: float = 1e-4  # TODO: Default is 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 512
+    num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -112,7 +112,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.CausalWrapper(env, shape=IMG_SIZE, rgb=True)
+        env = mywrapper.CausalWrapper(env, shape=IMG_SIZE, keep_dim=True, rgb=args_citris.rgb)
         UNFLATTEN_SPACE = env.observation_space
         env = gym.wrappers.FlattenObservation(env)
 
@@ -231,14 +231,14 @@ class Agent(nn.Module):
         # combined_rep = torch.concat((causal_rep, x), dim=1)  # Give the causal data as context for the pixel data
         # TODO: Sometimes action_mean results in NAN values?? --> Usually only after ~20.000 global steps
         #  Potentially exploding gradients resulting in NAN --> but gradient clipping should already take care of that
-
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        action = utils.mask_actions(action, dropout_prob=dropout_prob)
+            # TODO: Should dropout be done in the policy rollout or update? --> I believe in the rollout
+            action = utils.mask_actions(action, dropout_prob=dropout_prob)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
 
@@ -294,6 +294,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--num_causal_vars', type=int, default=6)
     parser.add_argument('--resume_training', type=bool, default=False)
+    parser.add_argument('--rgb', type=bool, default=True)
 
     datahandler = dh.DataHandling()
 
@@ -456,6 +457,10 @@ if __name__ == "__main__":
                                                                               action=b_actions[mb_inds],
                                                                               dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]
+
+                # TODO: Clip the logratio to be a maximum of 1
+                # logratio = torch.max(logratio, logratio.new_full(logratio.size(), 1))
+                
                 ratio = logratio.exp()
 
                 with torch.no_grad():
