@@ -81,7 +81,7 @@ class DataHandling:
 #     return datasets, data_loaders, env_name.lower()
 
 
-def load_data_new(args, img_data, interventions, env_name):
+def load_data_new(args, img_data, interventions, env_name, seq_len=3):
     print('Loading data...')
     env_name = env_name.split('-')[0]
     # Extend for different models
@@ -108,7 +108,7 @@ def load_data_new(args, img_data, interventions, env_name):
     folder = str(pathlib.Path(__file__).parent.resolve()) + '/data/'
 
     train_data = DataClass(data_folder=folder, img_data=img_data, interventions=interventions,
-                           split='train', single_image=False, seq_len=2, **dataset_args)
+                           split='train', single_image=False, seq_len=seq_len, **dataset_args)
     # TODO: pin_memory and num_workers had to be disabled to allow for the use of dataloaders strangely
     train_loader = data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False,
                                    pin_memory=False, drop_last=True, num_workers=0)

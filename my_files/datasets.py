@@ -62,6 +62,7 @@ class BaseDataset(data.Dataset):
 
     def _prepare_imgs(self, imgs):
         # TODO: Disabling the multiplication should preserve the original image colour
+        #  --> might also cause NAN issues due to no normalisation
         if self.encodings_active:
             return imgs
         else:

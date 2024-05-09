@@ -577,8 +577,8 @@ def get_default_parser():
     parser.add_argument('--exclude_objects', type=int, nargs='+', default=None)
     parser.add_argument('--coarse_vars', action='store_true')
     parser.add_argument('--data_img_width', type=int, default=-1)
-    parser.add_argument('--seq_len', type=int, default=2)
-    parser.add_argument('--lr', type=float, default=3e-4)  # TODO: Tune for better results --> Default: 1e-5
+    parser.add_argument('--seq_len', type=int, default=3)
+    parser.add_argument('--lr', type=float, default=5e-5)  # TODO: Tune for better results --> Default: 1e-5
     parser.add_argument('--warmup', type=int, default=100)
     parser.add_argument('--imperfect_interventions', action='store_true')
     parser.add_argument('--check_val_every_n_epoch', type=int, default=-1)

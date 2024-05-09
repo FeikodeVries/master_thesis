@@ -9,6 +9,7 @@ from collections import OrderedDict, defaultdict
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 import pathlib
+import cv2
 
 from cleanrl.my_files import utils
 from cleanrl.my_files import encoder_decoder as coding
@@ -159,7 +160,7 @@ class iCITRIS(nn.Module):
     def decode(self, z_sample):
         return self.decoder(z_sample)
 
-    def get_loss(self, batch, target, global_step):
+    def get_loss(self, batch, target, global_step, epoch, data_loader):
         """ Main training method for calculating the loss """
         imgs = batch.cuda()
         target = target.cuda().flatten(0, 1)
@@ -206,10 +207,20 @@ class iCITRIS(nn.Module):
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
-
         logging = {'kld': kld.mean(), 'rec_loss_t1': rec_loss.mean(), 'intv_classifier_z': loss_z,
                    'mi_estimator_model': loss_model_mi, 'mi_estimator_z': loss_z_mi,
                    'mi_estimator_factor': scheduler_factor, 'reg_loss': loss_z_reg}
+
+        if epoch == 0 and data_loader == 0:
+            # Save image of an original + reconstruction every policy rollout
+            path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+
+            original_img = imgs[0][0].permute(1,2,0).cpu().detach().numpy()
+            rec_img = x_rec[0][0].permute(1,2,0).cpu().detach().numpy()
+            rec_loss_img = round(rec_loss.mean().item())
+
+            cv2.imwrite(f"{path}/{global_step}_{rec_loss_img}_original.png", cv2.cvtColor(255*original_img, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(f"{path}/{global_step}_{rec_loss_img}_reconstruction.png", cv2.cvtColor(255*rec_img, cv2.COLOR_RGB2BGR))
 
         return loss, logging
 
@@ -224,9 +235,10 @@ class iCITRIS(nn.Module):
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars in binary
         # TODO: Move the latent assignment from binary to probability and test that for training
-        target_assignment = self.prior.get_target_assignment(hard=False)
+        target_assignment = self.prior.get_target_assignment(hard=True)
         # Assign latent vals to their respective causal var
-        latent_causal_assignment = target_assignment * z_sample[0][:, None]
+        latent_causal_assignment = [target_assignment * z_sample[i][:, None] for i in range(len(z_sample))]
+        latent_causal_assignment = torch.stack(latent_causal_assignment, dim=0)
 
         return latent_causal_assignment
 
@@ -243,6 +255,13 @@ class iCITRIS(nn.Module):
             self.intv_classifier.eval()
             self.prior.eval()
             self.mi_estimator.eval()
+
+    def clip_gradients(self):
+        nn.utils.clip_grad_norm_(self.encoder.parameters(), 0.5)
+        nn.utils.clip_grad_norm_(self.decoder.parameters(), 0.5)
+        nn.utils.clip_grad_norm_(self.intv_classifier.parameters(), 0.5)
+        nn.utils.clip_grad_norm_(self.prior.parameters(), 0.5)
+        nn.utils.clip_grad_norm_(self.mi_estimator.parameters(), 0.5)
 
     def get_params(self):
         """

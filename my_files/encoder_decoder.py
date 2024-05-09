@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 # METHODS: ENCODER-DECODER
 class Encoder(nn.Module):
     """
@@ -41,13 +42,15 @@ class Encoder(nn.Module):
                 ) for l_idx in range(num_layers)
             ],
             nn.Flatten(),
-            nn.Linear(4*4*c_hid, 4*c_hid),
+            nn.Linear(5*5*c_hid, 4*c_hid),  # TODO: the 5x5 is hardcoded to 80x80 image size
             nn.LayerNorm(4*c_hid),
             act_fn(),
             nn.Linear(4*c_hid, (2*num_latents if self.variational else num_latents))
         )
 
     def forward(self, img):
+        # self.test()
+        # test_img = self.test_net(img)
         feats = self.net(img)
         if self.variational:
             mean, log_std = feats.chunk(2, dim=-1)
@@ -85,7 +88,7 @@ class Decoder(nn.Module):
             nn.Linear(num_latents, 4 * c_hid),
             nn.LayerNorm(4 * c_hid),
             act_fn(),
-            nn.Linear(4 * c_hid, 4 * 4 * c_hid)
+            nn.Linear(4 * c_hid, 5*5*c_hid)  # TODO: 5x5 is hardcoded to support 80x80 image size
         )
         num_layers = int(np.log2(width) - 2)
         self.net = nn.Sequential(
@@ -96,7 +99,7 @@ class Decoder(nn.Module):
                         NormLayer(c_hid),
                         act_fn(),
                         nn.Conv2d(c_hid, c_hid, kernel_size=3, stride=1, padding=1),
-                        PositionLayer(c_hid),
+                        PositionLayer(c_hid, decoding=True),
                         NormLayer(c_hid),
                         act_fn(),
                         nn.Conv2d(c_hid, c_hid, kernel_size=3, stride=1, padding=1)
@@ -106,7 +109,7 @@ class Decoder(nn.Module):
             NormLayer(c_hid),
             act_fn(),
             nn.Conv2d(c_hid, c_hid, 1),
-            PositionLayer(c_hid),
+            PositionLayer(c_hid, decoding=True),
             NormLayer(c_hid),
             act_fn(),
             nn.Conv2d(c_hid, num_labels, 1),
@@ -115,7 +118,7 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         x = self.linear(x)
-        x = x.reshape(x.shape[0], -1, 4, 4)
+        x = x.reshape(x.shape[0], -1, 5, 5) # TODO: 5x5 is needed
         x = self.net(x)
         return x
 
@@ -135,15 +138,18 @@ class ResidualBlock(nn.Module):
 class PositionLayer(nn.Module):
     """ Module for adding position features to images """
 
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, decoding=False):
         super().__init__()
         self.pos_embed = nn.Linear(2, hidden_dim)
+        self.decoding = decoding
 
     def forward(self, x):
         pos = create_pos_grid(x.shape[2:], x.device)
         pos = self.pos_embed(pos)
         pos = pos.permute(2, 0, 1)[None]
         x = x + pos
+        if self.decoding:
+            test = 1
         return x
 
 

@@ -13,8 +13,8 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
-import pytorch_lightning as pl
 from gymnasium import spaces
+from statistics import mean
 
 from my_files.datahandling import load_data_new
 import my_files.datahandling as dh
@@ -55,11 +55,11 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4  # TODO: Default is 3e-4
+    learning_rate: float = 5e-5  # TODO: Default is 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -67,7 +67,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32  # TODO: Default(32) Could be that the running average from BatchNorm is unstable due to very small minibatches?
+    num_minibatches: int = 128  # TODO: Default(32) Could be that the running average from BatchNorm is unstable due to very small minibatches?
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -96,7 +96,9 @@ class Args:
 
 
 UNFLATTEN_SPACE = None
-IMG_SIZE = 64   # TODO: Can only be doubled or halved, any other change will instantly crash the system
+IMG_SIZE = 80
+# TODO: IMG_Size has to have a whole number as output when calculating x**n = IMG_SIZE / n
+#  Otherwise there are issues with decoder resizing, other possible image sizes are: 64: n=4, 96: n=6
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -136,43 +138,49 @@ class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         # self.critic = nn.Sequential(
-        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
+        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 64)),
         #     nn.Tanh(),
         #     layer_init(nn.Linear(64, 64)),
         #     nn.Tanh(),
         #     layer_init(nn.Linear(64, 1), std=1.0),
         # )
         # self.actor_mean = nn.Sequential(
-        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 64)),
+        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 64)),
         #     nn.Tanh(),
         #     layer_init(nn.Linear(64, 64)),
         #     nn.Tanh(),
         #     layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1),
         # )
 
+        # self.critic = nn.Sequential(
+        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 256)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(256, 128)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(128, 128)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(128, 1), std=1.0),
+        # )
+        # self.actor_mean = nn.Sequential(
+        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 256)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(256, 128)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(128, 128)),
+        #     nn.Tanh(),
+        #     layer_init(nn.Linear(128, np.prod(envs.single_action_space.shape)), std=0.1),
+        # )
+
+        # TODO: Sometimes, the actor MLP returns NAN?
         self.critic = nn.Sequential(
-            layer_init(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, padding=1)),
-            nn.LeakyReLU(inplace=True),
-            layer_init(nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, padding=1)),
-            nn.LeakyReLU(inplace=True),
-            nn.Flatten(),
-            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()*16, 64)),
-            nn.ReLU(inplace=True),
-            layer_init(nn.Linear(64, 64)),
-            nn.ReLU(inplace=True),
-            layer_init(nn.Linear(64, 1), std=1.0)
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
+            layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
+            layer_init(nn.Linear(1024, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, padding=1)),
-            nn.LeakyReLU(inplace=True),
-            layer_init(nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, padding=1)),
-            nn.LeakyReLU(inplace=True),
-            nn.Flatten(),
-            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()*16, 64)),
-            nn.ReLU(inplace=True),
-            layer_init(nn.Linear(64, 64)),
-            nn.ReLU(inplace=True),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1)
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
+            layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
+            layer_init(nn.Linear(1024, np.prod(envs.single_action_space.shape)), std=0.01),
         )
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
@@ -194,9 +202,9 @@ class Agent(nn.Module):
             final_processed = processed if final_processed is None else torch.cat((final_processed, processed))
 
         causal_rep = self.causal_model.get_causal_rep(final_processed)
-        # causal_rep = torch.flatten(causal_rep)[None, :]
+        causal_rep = torch.flatten(causal_rep, start_dim=1)
 
-        return causal_rep[None, None, :]
+        return causal_rep
 
     def unflatten_and_process(self, x):
         """
@@ -214,11 +222,16 @@ class Agent(nn.Module):
 
     def get_value(self, x):
         causal_rep = self.get_causal_rep_from_img(x)
+        # combined_rep = torch.concat((causal_rep, x), dim=1)
         return self.critic(causal_rep)
 
     def get_action_and_value(self, x, action=None, dropout_prob=0.1):
         # Prevent the gradient from flowing through the policy
         causal_rep = self.get_causal_rep_from_img(x).detach()
+        # combined_rep = torch.concat((causal_rep, x), dim=1)  # Give the causal data as context for the pixel data
+        # TODO: Sometimes action_mean results in NAN values?? --> Usually only after ~20.000 global steps
+        #  Potentially exploding gradients resulting in NAN --> but gradient clipping should already take care of that
+
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
@@ -261,7 +274,7 @@ if __name__ == "__main__":
     parser.add_argument('--dropout_update', type=float, default=0.1)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
+    parser.add_argument('--num_latents', type=int, default=32)          # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -286,13 +299,9 @@ if __name__ == "__main__":
 
     args_citris = parser.parse_args()
     model_args = vars(args_citris)
-    citris_counter = 0
-    last_loss = None
     args.num_pretraining = args_citris.pretraining_size // args.batch_size
     CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
                                     low=-float("inf"), high=float("inf"), dtype=np.float32)
-
-    pl.seed_everything(args.seed)
     # END MYCODE
 
     # TRY NOT TO MODIFY: seeding
@@ -349,7 +358,8 @@ if __name__ == "__main__":
     optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
                             {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
                             {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
-                            {'params': citris_other_params}], lr=args_citris.lr, weight_decay=0.0)
+                            {'params': citris_other_params, 'lr': args_citris.lr, 'weight_decay': 1e-4}],
+                           lr=args.learning_rate, weight_decay=0.0)
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -419,19 +429,24 @@ if __name__ == "__main__":
 
         # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
         interventions = torch.where(actions != 0, 1.0, 0.0)
+
         unflatten_obs = None
         for ob in obs:
             processed = agent.unflatten_and_process(ob)
             unflatten_obs = processed if unflatten_obs is None else torch.concat((unflatten_obs, processed))
 
         datasets, data_loaders, data_name = load_data_new(args_citris, img_data=unflatten_obs,
-                                                          interventions=interventions, env_name=args.env_id)
+                                                          interventions=interventions, env_name=args.env_id,
+                                                          seq_len=args_citris.seq_len)
 
         # Optimizing the policy and value network
         clipfracs = []
         for epoch in range(args.update_epochs):
             print(f'UPDATE EPOCH {epoch}')
-            # TODO: Test if the shuffled datapoints cause issues
+            data_loader = 0
+            citris_track_logs = {'kld': [], 'rec_loss_t1': [], 'intv_classifier_z': [], 'mi_estimator_model': [],
+                                 'mi_estimator_z': [], 'mi_estimator_factor': [], 'reg_loss': []}
+            citris_track_loss = []
             for x in data_loaders['train']:
                 img_pairs = x[0]
                 targets = x[1]
@@ -478,14 +493,27 @@ if __name__ == "__main__":
                 # Calculate citris loss
                 citris_loss, citris_logs = agent.causal_model.get_loss(batch=img_pairs,
                                                                        target=targets,
-                                                                       global_step=global_step)
+                                                                       global_step=global_step,
+                                                                       epoch=epoch,
+                                                                       data_loader=data_loader)
+                # Save all intermediate values for more accurate tracking of performance
+                for key, value in citris_logs.items():
+                    if key == 'mi_estimator_factor':
+                        citris_track_logs[key].append(value)
+                    else:
+                        citris_track_logs[key].append(value.item())
+                citris_track_loss.append(citris_loss.item())
+                # To prevent an overflow of saved images
+                data_loader += 1
 
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
 
                 agent.causal_model.set_train(training=True)
                 optimizer.zero_grad()
                 loss.backward()
+                # TODO: This probably already stabilises the child models, but I'm not fully sure
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                agent.causal_model.clip_gradients()
                 optimizer.step()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
@@ -506,9 +534,9 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
 
         # CITRIS LOGGING
-        for key, value in citris_logs.items():
-            writer.add_scalar(f"icitris/{key}", value, global_step)
-        writer.add_scalar("icitris/train_loss", citris_loss, global_step)
+        for key, value in citris_track_logs.items():
+            writer.add_scalar(f"icitris/{key}", mean(value), global_step)
+        writer.add_scalar("icitris/train_loss", mean(citris_track_loss), global_step)
 
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
