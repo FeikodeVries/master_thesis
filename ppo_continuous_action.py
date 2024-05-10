@@ -55,7 +55,7 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 1e-4  # TODO: Default is 3e-4
+    learning_rate: float = 3e-4  # TODO: Default is 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
@@ -173,23 +173,25 @@ class Agent(nn.Module):
 
         # TODO: Sometimes, the actor MLP returns NAN?
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
+            layer_init(nn.Linear(args_citris.num_latents, 1024)), nn.ReLU(),
+            # layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
+            layer_init(nn.Linear(args_citris.num_latents, 1024)), nn.ReLU(),
+            # layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, np.prod(envs.single_action_space.shape)), std=0.01),
         )
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
-        self.causal_model = iCITRIS(c_hid=args_citris.c_hid, width=IMG_SIZE,  num_latents=args_citris.num_latents,
-                                    num_causal_vars=args_citris.num_causal_vars, run_name=run_name,
-                                    lambda_sparse=args_citris.lambda_sparse, act_fn=args_citris.act_fn,
-                                    beta_classifier=args_citris.beta_classifier,
-                                    beta_mi_estimator=args_citris.beta_mi_estimator,
-                                    beta_t1=args_citris.beta_t1, autoregressive_prior=args_citris.autoregressive_prior)
+        self.causal_model = iCITRIS(c_hid=args_citris.c_hid, width=IMG_SIZE, num_latents=args_citris.num_latents,
+                                    c_in=3 if args_citris.rgb else 1, num_causal_vars=args_citris.num_causal_vars,
+                                    run_name=run_name, lambda_sparse=args_citris.lambda_sparse,
+                                    act_fn=args_citris.act_fn, beta_classifier=args_citris.beta_classifier,
+                                    beta_mi_estimator=args_citris.beta_mi_estimator, beta_t1=args_citris.beta_t1,
+                                    autoregressive_prior=args_citris.autoregressive_prior)
 
     def get_causal_rep_from_img(self, x):
         """
@@ -229,8 +231,6 @@ class Agent(nn.Module):
         # Prevent the gradient from flowing through the policy
         causal_rep = self.get_causal_rep_from_img(x).detach()
         # combined_rep = torch.concat((causal_rep, x), dim=1)  # Give the causal data as context for the pixel data
-        # TODO: Sometimes action_mean results in NAN values?? --> Usually only after ~20.000 global steps
-        #  Potentially exploding gradients resulting in NAN --> but gradient clipping should already take care of that
         action_mean = self.actor_mean(causal_rep)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
@@ -274,7 +274,7 @@ if __name__ == "__main__":
     parser.add_argument('--dropout_update', type=float, default=0.1)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=32)          # TODO: Optimise hyperparam --> Default: 32
+    parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -294,7 +294,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--num_causal_vars', type=int, default=6)
     parser.add_argument('--resume_training', type=bool, default=False)
-    parser.add_argument('--rgb', type=bool, default=True)
+    parser.add_argument('--rgb', type=bool, default=False)
+    parser.add_argument('--action_repeat', type=int, default=2)
 
     datahandler = dh.DataHandling()
 
@@ -335,8 +336,6 @@ if __name__ == "__main__":
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
-    # causal_reps = torch.zeros((args.num_steps, args.num_envs) + CAUSAL_OBSERVATION.shape).to(device)
-
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
@@ -359,8 +358,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
                             {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
                             {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
-                            {'params': citris_other_params, 'lr': args_citris.lr, 'weight_decay': 1e-4}],
-                           lr=args.learning_rate, weight_decay=0.0)
+                            {'params': citris_other_params}], lr=args.learning_rate, weight_decay=0.0)
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -384,8 +382,16 @@ if __name__ == "__main__":
             dones[step] = next_done
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(x=next_obs,
-                                                                       dropout_prob=args_citris.dropout_update)
+                # TODO: Do action repeat, only do a new action every so often so the results of a
+                #   certain action can be clearer to the system
+                if (step % args_citris.action_repeat) == 0:
+                    action, logprob, _, value = agent.get_action_and_value(x=next_obs,
+                                                                           dropout_prob=args_citris.dropout_update)
+                else:
+                    action = actions[step - 1]
+                    logprob = logprobs[step - 1]
+                    value = values[step-1][None, :]
+
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -460,7 +466,7 @@ if __name__ == "__main__":
 
                 # TODO: Clip the logratio to be a maximum of 1
                 # logratio = torch.max(logratio, logratio.new_full(logratio.size(), 1))
-                
+
                 ratio = logratio.exp()
 
                 with torch.no_grad():
