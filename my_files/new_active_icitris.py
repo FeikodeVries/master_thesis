@@ -1,19 +1,13 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import LearningRateMonitor
 import numpy as np
 from collections import OrderedDict, defaultdict
-from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
 import pathlib
 import cv2
 
 from cleanrl.my_files import utils
 from cleanrl.my_files import encoder_decoder as coding
-from cleanrl.my_files import flow_modules as flow
 from cleanrl.my_files import causal_disentanglement as causal
 
 
@@ -29,8 +23,8 @@ class iCITRIS(nn.Module):
                  lambda_sparse=0.0,
                  num_graph_samples=8,
                  act_fn='silu',
-                 beta_classifier=2.0,
-                 beta_mi_estimator=2.0,
+                 beta_classifier=4.0,
+                 beta_mi_estimator=0.0,
                  beta_t1=1.0,
                  var_names=None,
                  autoregressive_prior=False,
@@ -165,12 +159,16 @@ class iCITRIS(nn.Module):
         imgs = batch.cuda()
         target = target.cuda().flatten(0, 1)
         labels = imgs
+
         # En- and decode every element
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])
         z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
         z_sample = z_sample.flatten(0, 1)
+
+        test = 1
+
         x_rec = self.decoder(z_sample.unflatten(0, imgs.shape[:2])[:, 1:].flatten(0, 1))
         z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in
                                              [z_sample, z_mean, z_logstd, x_rec]]
@@ -214,12 +212,15 @@ class iCITRIS(nn.Module):
             # Save image of an original + reconstruction every policy rollout
             path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
 
-            original_img = imgs[0][0].permute(1,2,0).cpu().detach().numpy()
-            rec_img = x_rec[0][0].permute(1,2,0).cpu().detach().numpy()
-            rec_loss_img = round(rec_loss.mean().item())
-
-            cv2.imwrite(f"{path}/{global_step}_{rec_loss_img}_original.png", cv2.cvtColor(255*original_img, cv2.COLOR_RGB2BGR))
-            cv2.imwrite(f"{path}/{global_step}_{rec_loss_img}_reconstruction.png", cv2.cvtColor(255*rec_img, cv2.COLOR_RGB2BGR))
+            original_img = imgs[-1].permute(0, 2, 3, 1).cpu().detach().numpy()
+            rec_img = x_rec[-1].permute(0, 2, 3, 1).cpu().detach().numpy()
+            for i in range(len(original_img)):
+                cv2.imwrite(f"{path}/{global_step}_{i}_original.png", cv2.cvtColor(255*original_img[i],
+                                                                                   cv2.COLOR_RGB2BGR))
+            for i in range(len(rec_img)):
+                rec_loss_current = round(rec_loss[-1][i].item())
+                cv2.imwrite(f"{path}/{global_step}_{i+1}_recloss{rec_loss_current}.png",
+                            cv2.cvtColor(255*rec_img[i], cv2.COLOR_RGB2BGR))
 
         return loss, logging
 
@@ -236,13 +237,12 @@ class iCITRIS(nn.Module):
         # TODO: Usually the output of the encoder is provided as input to the neural net, as the encoder is trained
         #  using the causal logic
         # # TODO: Move the latent assignment from binary to probability and test that for training
-        # target_assignment = self.prior.get_target_assignment(hard=False)
-        # # Assign latent vals to their respective causal var
-        # latent_causal_assignment = [target_assignment * z_sample[i][:, None] for i in range(len(z_sample))]
-        # latent_causal_assignment = torch.stack(latent_causal_assignment, dim=0)
+        target_assignment = self.prior.get_target_assignment(hard=False)
+        # Assign latent vals to their respective causal var
+        latent_causal_assignment = [target_assignment * z_sample[i][:, None] for i in range(len(z_sample))]
+        latent_causal_assignment = torch.stack(latent_causal_assignment, dim=0)
 
-        # return latent_causal_assignment
-        return z_sample
+        return latent_causal_assignment
 
     def set_train(self, training=True):
         if training:

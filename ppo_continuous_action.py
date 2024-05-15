@@ -77,7 +77,7 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0  # TODO: See if this could help
+    ent_coef: float = 0.0  # TODO: See if this could help --> 0.01 could be useful
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -173,13 +173,13 @@ class Agent(nn.Module):
 
         # TODO: Sometimes, the actor MLP returns NAN?
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(args_citris.num_latents, 1024)), nn.ReLU(),
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             # layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(args_citris.num_latents, 1024)), nn.ReLU(),
+            layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             # layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, np.prod(envs.single_action_space.shape)), std=0.01),
@@ -271,7 +271,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_hid', type=int, default=32)                # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--pretraining_size', type=float, default=0)
     parser.add_argument('--dropout_pretraining', type=float, default=0.7)
-    parser.add_argument('--dropout_update', type=float, default=0.1)    # TODO: Optimise hyperparam (default: .1)
+    parser.add_argument('--dropout_update', type=float, default=0.2)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
     parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
@@ -285,8 +285,8 @@ if __name__ == "__main__":
     parser.add_argument('--gamma', type=float, default=1.0)
     parser.add_argument('--lambda_reg', type=float, default=0.0)
     parser.add_argument('--autoregressive_prior', action='store_true')
-    parser.add_argument('--beta_classifier', type=float, default=2.0)
-    parser.add_argument('--beta_mi_estimator', type=float, default=2.0)
+    parser.add_argument('--beta_classifier', type=float, default=4.0)
+    parser.add_argument('--beta_mi_estimator', type=float, default=0.0)
     parser.add_argument('--lambda_sparse', type=float, default=0.02)
     parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
     parser.add_argument('--graph_learning_method', type=str, default="ENCO")
@@ -296,6 +296,8 @@ if __name__ == "__main__":
     parser.add_argument('--resume_training', type=bool, default=False)
     parser.add_argument('--rgb', type=bool, default=False)
     parser.add_argument('--action_repeat', type=int, default=2)
+    parser.add_argument('--max_iters', type=int, default=100000)
+    # TODO: There is a bug in rgb TRUE, it absolutely tanks performance
 
     datahandler = dh.DataHandling()
 
@@ -354,11 +356,16 @@ if __name__ == "__main__":
     # Remove the causal model params from the PPO agent
     agent_params = [param for name, param in agent.named_parameters() if not name.startswith('causal_model')]
 
-    # TODO: Potentially use AdamW
+    # TODO: Potentially use AdamW --> optimise the values of the learning rate scheduler
     optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
                             {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
                             {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
                             {'params': citris_other_params}], lr=args.learning_rate, weight_decay=0.0)
+    scheduler = utils.CosineWarmupScheduler(optimizer,
+                                            warmup=[200 * args_citris.warmup, 2 * args_citris.warmup,
+                                                     2 * args_citris.warmup],
+                                             offset=[10000, 0, 0],
+                                             max_iters=args_citris.max_iters)
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -435,6 +442,8 @@ if __name__ == "__main__":
         b_values = values.reshape(-1)
 
         # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
+        # TODO: These might need to be the other way around as the 0 values are the intervened ones --> if all zeros,
+        #   the system will return zeros
         interventions = torch.where(actions != 0, 1.0, 0.0)
 
         unflatten_obs = None
@@ -464,8 +473,9 @@ if __name__ == "__main__":
                                                                               dropout_prob=args_citris.dropout_update)
                 logratio = newlogprob - b_logprobs[mb_inds]
 
-                # TODO: Clip the logratio to be a maximum of 1
-                # logratio = torch.max(logratio, logratio.new_full(logratio.size(), 1))
+                # TODO: Clip the logratio to a range of -0.02 and 0.02
+                logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.02))
+                logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.02))
 
                 ratio = logratio.exp()
 
@@ -517,8 +527,8 @@ if __name__ == "__main__":
                 # To prevent an overflow of saved images
                 data_loader += 1
 
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
-
+                # loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
+                loss = citris_loss
                 agent.causal_model.set_train(training=True)
                 optimizer.zero_grad()
                 loss.backward()
@@ -527,6 +537,8 @@ if __name__ == "__main__":
                 agent.causal_model.clip_gradients()
                 optimizer.step()
 
+            # TODO: This should be correct for the scheduler
+            scheduler.step()
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
@@ -565,3 +577,6 @@ if __name__ == "__main__":
     print(f"End of training, took: {(time.time() - start_time) / 60} minutes")
     envs.close()
     writer.close()
+
+    #  TODO: Current setup: 80x80, bw, lr1e3, dropout 0.2, learning rate scheduler enabled, mi_coef = 0,
+    #   target classifier coef = 4

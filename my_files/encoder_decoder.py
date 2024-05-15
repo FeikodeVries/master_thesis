@@ -118,7 +118,7 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         x = self.linear(x)
-        x = x.reshape(x.shape[0], -1, 5, 5) # TODO: 5x5 is needed
+        x = x.reshape(x.shape[0], -1, 5, 5)  # TODO: 5x5 is needed
         x = self.net(x)
         return x
 
