@@ -66,7 +66,7 @@ class BaseDataset(data.Dataset):
         if self.encodings_active:
             return imgs
         else:
-            imgs = imgs.float() / 255.0
+            # imgs = imgs.float() / 255.0
             # imgs = imgs * 2.0 - 1.0
             return imgs
 

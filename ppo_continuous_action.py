@@ -21,6 +21,7 @@ import my_files.datahandling as dh
 from my_files.new_active_icitris import iCITRIS
 from my_files import custom_env_wrappers as mywrapper
 import my_files.utils as utils
+from gymnasium.wrappers import PixelObservationWrapper, ResizeObservation, FrameStack
 
 
 @dataclass
@@ -57,9 +58,9 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4  # TODO: Default is 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 5
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -95,34 +96,35 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-UNFLATTEN_SPACE = None
-IMG_SIZE = 80
+IMG_SIZE = 84
 # TODO: IMG_Size has to have a whole number as output when calculating x**n = IMG_SIZE / n
 #  Otherwise there are issues with decoder resizing, other possible image sizes are: 64: n=4, 96: n=6
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma):
-    def thunk():
-        global UNFLATTEN_SPACE
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id, render_mode="rgb_array")
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
+def make_env(env_id, capture_video, run_name, gamma):
+    # def thunk():
+    # if capture_video and idx == 0:
+    if capture_video:
+        env = gym.make(env_id, render_mode="rgb_array")
+        env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+    else:
+        env = gym.make(env_id, render_mode="rgb_array")
+    env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+    env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        env = mywrapper.CausalWrapper(env, shape=IMG_SIZE, keep_dim=True, rgb=args_citris.rgb)
-        UNFLATTEN_SPACE = env.observation_space
-        env = gym.wrappers.FlattenObservation(env)
+    # TODO: Stack the frames in a rolling manner
+    env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
+    env = mywrapper.ResizeObservation(env, shape=IMG_SIZE)
+    env = gym.wrappers.FrameStack(env, num_stack=args_citris.framestack)
+    # env = gym.wrappers.FlattenObservation(env)
 
-        env = gym.wrappers.ClipAction(env)
+    env = gym.wrappers.ClipAction(env)
 
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        return env
+    env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+    env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+    return env
 
-    return thunk
+    # return thunk
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -182,12 +184,13 @@ class Agent(nn.Module):
             layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             # layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
-            layer_init(nn.Linear(1024, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(1024, np.prod(envs.action_space.shape)), std=0.01),
         )
 
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
         self.causal_model = iCITRIS(c_hid=args_citris.c_hid, width=IMG_SIZE, num_latents=args_citris.num_latents,
-                                    c_in=3 if args_citris.rgb else 1, num_causal_vars=args_citris.num_causal_vars,
+                                    obs_shape=envs.observation_space.shape, c_in=3 if args_citris.rgb else 1,
+                                    num_causal_vars=args_citris.num_causal_vars,
                                     run_name=run_name, lambda_sparse=args_citris.lambda_sparse,
                                     act_fn=args_citris.act_fn, beta_classifier=args_citris.beta_classifier,
                                     beta_mi_estimator=args_citris.beta_mi_estimator, beta_t1=args_citris.beta_t1,
@@ -214,9 +217,9 @@ class Agent(nn.Module):
         :return: Unflattened image tensor, to be used by iCITRIS
         """
         # Unflatten image
-        unflatten_x = spaces.unflatten(UNFLATTEN_SPACE, x.detach().cpu())
+        # unflatten_x = spaces.unflatten(UNFLATTEN_SPACE, x.detach().cpu())
         # Push the image into the correct shape for icitris to use
-        obs = np.array([unflatten_x['pixels']])
+        #obs = np.array([obs['pixels']])
         img = torch.from_numpy(np.array(obs)).float()
         img = img.permute(0, 3, 1, 2)
 
@@ -271,7 +274,7 @@ if __name__ == "__main__":
     parser.add_argument('--c_hid', type=int, default=32)                # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--pretraining_size', type=float, default=0)
     parser.add_argument('--dropout_pretraining', type=float, default=0.7)
-    parser.add_argument('--dropout_update', type=float, default=0.2)    # TODO: Optimise hyperparam (default: .1)
+    parser.add_argument('--dropout_update', type=float, default=0.01)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
     parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
@@ -294,8 +297,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--num_causal_vars', type=int, default=6)
     parser.add_argument('--resume_training', type=bool, default=False)
-    parser.add_argument('--rgb', type=bool, default=False)
+    parser.add_argument('--rgb', type=bool, default=True)
     parser.add_argument('--action_repeat', type=int, default=2)
+    parser.add_argument('--framestack', type=int, default=3)
     parser.add_argument('--max_iters', type=int, default=100000)
     # TODO: There is a bug in rgb TRUE, it absolutely tanks performance
 
@@ -316,10 +320,8 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name,args.gamma) for i in range(args.num_envs)])
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    # TODO: Removed the possibility of syncing multiple environments
+    envs = make_env(args.env_id, args.capture_video, run_name, args.gamma)
 
     agent = Agent(envs).to(device)
     if args.load_model:
@@ -331,8 +333,8 @@ if __name__ == "__main__":
             print("Pretrained RL model not found")
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -364,8 +366,8 @@ if __name__ == "__main__":
     scheduler = utils.CosineWarmupScheduler(optimizer,
                                             warmup=[200 * args_citris.warmup, 2 * args_citris.warmup,
                                                      2 * args_citris.warmup],
-                                             offset=[10000, 0, 0],
-                                             max_iters=args_citris.max_iters)
+                                            offset=[10000, 0, 0],
+                                            max_iters=args_citris.max_iters)
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -434,9 +436,9 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_obs = obs.reshape((-1,) + envs.observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_actions = actions.reshape((-1,) + envs.action_space.shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
@@ -534,7 +536,7 @@ if __name__ == "__main__":
                 loss.backward()
                 # TODO: This probably already stabilises the child models, but I'm not fully sure
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                agent.causal_model.clip_gradients()
+                # agent.causal_model.clip_gradients()
                 optimizer.step()
 
             # TODO: This should be correct for the scheduler
@@ -578,5 +580,5 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
-    #  TODO: Current setup: 80x80, bw, lr1e3, dropout 0.2, learning rate scheduler enabled, mi_coef = 0,
-    #   target classifier coef = 4
+    #  TODO: Current setup: 80x80, bw, lr1e3, dropout 0.01, learning rate scheduler enabled, mi_coef = 0,
+    #   target classifier coef = 4, no target classifier loss, no prior (kld) loss

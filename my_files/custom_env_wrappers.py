@@ -7,12 +7,8 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import cv2
-import torch
-import pathlib
-import os
-import matplotlib.pyplot as plt
-import cleanrl.my_files.datahandling as dh
-from cleanrl.my_files.active_icitris import active_iCITRISVAE
+from collections import deque
+from gymnasium.error import DependencyNotInstalled
 
 STATE_KEY = "state"
 
@@ -120,7 +116,7 @@ class CausalWrapper(gym.ObservationWrapper):
                 )
 
         if pixels_only:
-            self.observation_space = spaces.Dict()
+            self.observation_space = None
         elif self._observation_is_dict:
             self.observation_space = copy.deepcopy(wrapped_observation_space)
         else:
@@ -148,8 +144,8 @@ class CausalWrapper(gym.ObservationWrapper):
 
             # START MYCODE
             if self.rgb:
-                pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 3),
-                                          low=low, high=high, dtype=pixels.dtype)
+                self.observation_space = spaces.Box(shape=[self.shape[0], self.shape[1], 3],
+                                                    low=low, high=high, dtype=pixels.dtype)
             else:
                 if self.keep_dim:
                     pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1], 1),
@@ -158,10 +154,10 @@ class CausalWrapper(gym.ObservationWrapper):
                     pixels_space = spaces.Box(shape=(self.shape[0], self.shape[1]), low=low,
                                               high=high, dtype=pixels.dtype)
 
-            pixels_spaces[pixel_key] = pixels_space
+            # pixels_spaces[pixel_key] = pixels_space
             # END MYCODE
 
-        self.observation_space.spaces.update(pixels_spaces)
+        # self.observation_space.spaces.update(pixels_spaces)
 
         self._pixels_only = pixels_only
         self._render_kwargs = render_kwargs
@@ -221,4 +217,75 @@ class CausalWrapper(gym.ObservationWrapper):
         if isinstance(render, list):
             self.render_history += render
         return render
+
+
+class ResizeObservation(gym.ObservationWrapper, gym.utils.RecordConstructorArgs):
+    """Resize the image observation.
+
+    This wrapper works on environments with image observations. More generally,
+    the input can either be two-dimensional (AxB, e.g. grayscale images) or
+    three-dimensional (AxBxC, e.g. color images). This resizes the observation
+    to the shape given by the 2-tuple :attr:`shape`.
+    The argument :attr:`shape` may also be an integer, in which case, the
+    observation is scaled to a square of side-length :attr:`shape`.
+
+    Example:
+        >>> import gymnasium as gym
+        >>> from gymnasium.wrappers import ResizeObservation
+        >>> env = gym.make("CarRacing-v2")
+        >>> env.observation_space.shape
+        (96, 96, 3)
+        >>> env = ResizeObservation(env, 64)
+        >>> env.observation_space.shape
+        (64, 64, 3)
+    """
+
+    def __init__(self, env: gym.Env, shape: tuple[int, int] | int) -> None:
+        """Resizes image observations to shape given by :attr:`shape`.
+
+        Args:
+            env: The environment to apply the wrapper
+            shape: The shape of the resized observations
+        """
+        gym.utils.RecordConstructorArgs.__init__(self, shape=shape)
+        gym.ObservationWrapper.__init__(self, env)
+
+        if isinstance(shape, int):
+            shape = (shape, shape)
+        assert len(shape) == 2 and all(x > 0 for x in shape), \
+            f"Expected shape to be a 2-tuple of positive integers, got: {shape}"
+
+        self.shape = tuple(shape)
+
+        assert isinstance(env.observation_space['pixels'], gym.spaces.Box), f"Expected the observation space to be Box, " \
+                                                                  f"actual type: {type(env.observation_space['pixels'])}"
+        dims = len(env.observation_space['pixels'].shape)
+        assert (dims == 2 or dims == 3), f"Expected the observation space to have 2 or 3 dimensions, got: {dims}"
+
+        obs_shape = self.shape + env.observation_space['pixels'].shape[2:]
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=obs_shape, dtype=np.uint8)
+
+    def observation(self, observation):
+        """Updates the observations by resizing the observation to shape given by :attr:`shape`.
+
+        Args:
+            observation: The observation to reshape
+
+        Returns:
+            The reshaped observations
+
+        Raises:
+            DependencyNotInstalled: opencv-python is not installed
+        """
+        try:
+            import cv2
+        except ImportError as e:
+            raise DependencyNotInstalled(
+                "opencv (cv2) is not installed, run `pip install gymnasium[other]`"
+            ) from e
+
+        observation = cv2.resize(
+            observation, self.shape[::-1], interpolation=cv2.INTER_AREA
+        )
+        return observation.reshape(self.observation_space['pixels'].shape)
 

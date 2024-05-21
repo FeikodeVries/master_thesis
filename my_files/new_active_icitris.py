@@ -17,6 +17,7 @@ class iCITRIS(nn.Module):
     def __init__(self, c_hid, num_latents,
                  num_causal_vars,
                  run_name,
+                 obs_shape,
                  width=64,
                  graph_learning_method="ENCO",
                  c_in=3,
@@ -90,19 +91,30 @@ class iCITRIS(nn.Module):
         self.beta_classifier = beta_classifier
         self.beta_t1 = beta_t1
 
+        # TODO: Clean up
         # Encoder-Decoder init
-        self.encoder = coding.Encoder(num_latents=num_latents,
-                                      c_hid=c_hid,
-                                      c_in=c_in,
-                                      width=width,
-                                      act_fn=act_fn_func,
-                                      variational=True)
-        self.decoder = coding.Decoder(num_latents=num_latents,
-                                      c_hid=c_hid,
-                                      c_out=c_in,
-                                      width=width,
-                                      num_blocks=1,
-                                      act_fn=act_fn_func)
+        self.encoder = coding.make_encoder(encoder_type='pixel', obs_shape=obs_shape, feature_dim=50,
+                                           num_layers=4, num_filters=32).to('cuda')
+        self.decoder = coding.make_decoder(decoder_type='pixel', obs_shape=obs_shape, feature_dim=50, num_layers=4,
+                                           num_filters=32).to('cuda')
+        self.decoder.apply(weight_init)
+
+        self.encoder_optimiser = torch.optim.Adam(self.encoder.parameters(), lr=1e-3)
+        self.decoder_optimiser = torch.optim.Adam(self.decoder.parameters(), lr=1e-3,
+                                                  weight_decay=0.0)
+
+        # self.encoder = coding.Encoder(num_latents=num_latents,
+        #                               c_hid=c_hid,
+        #                               c_in=c_in,
+        #                               width=width,
+        #                               act_fn=act_fn_func,
+        #                               variational=True)
+        # self.decoder = coding.Decoder(num_latents=num_latents,
+        #                               c_hid=c_hid,
+        #                               c_out=c_in,
+        #                               width=width,
+        #                               num_blocks=1,
+        #                               act_fn=act_fn_func)
         # Prior
         self.prior = utils.InstantaneousPrior(num_latents=num_latents,
                                               c_hid=c_hid,
@@ -160,14 +172,19 @@ class iCITRIS(nn.Module):
         target = target.cuda().flatten(0, 1)
         labels = imgs
 
+        latent_encoding = self.encoder(imgs)
+        if labels.dim() == 4:
+            # preprocess images to be in [-0.5, 0.5] range
+            target_obs = utils.preprocess_obs(labels)
+        rec_obs = self.decoder(latent_encoding)
+
         # En- and decode every element
+        # TODO: Check if all the inputs and outputs are as expected with the new AE
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])
         z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
         z_sample = z_sample.flatten(0, 1)
-
-        test = 1
 
         x_rec = self.decoder(z_sample.unflatten(0, imgs.shape[:2])[:, 1:].flatten(0, 1))
         z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in
@@ -183,15 +200,19 @@ class iCITRIS(nn.Module):
         kld = kld.unflatten(0, (imgs.shape[0], -1))
 
         # Calculate reconstruction loss
+        # TODO: Replace the reconstruction loss with the loss from SAC+AE
         rec_loss = F.mse_loss(x_rec, labels[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
         # Combine to full loss
-        loss = (kld * self.beta_t1 + rec_loss).mean()
+        # TODO: Train without the prior loss
+        # loss = (kld * self.beta_t1 + rec_loss).mean()
+        loss = rec_loss.mean()
         # Target classifier
         loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
                                                   logger=None,
                                                   target=target,
                                                   transition_prior=self.prior)
-        loss = loss + loss_model + loss_z * self.beta_classifier
+        # TODO: Train without the target classifier loss
+        # loss = loss + loss_model + loss_z * self.beta_classifier
         # Mutual information estimator
         scheduler_factor = self.mi_scheduler.get_factor(global_step)
         loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
@@ -245,18 +266,11 @@ class iCITRIS(nn.Module):
         return latent_causal_assignment
 
     def set_train(self, training=True):
-        if training:
-            self.encoder.train()
-            self.decoder.train()
-            self.intv_classifier.train()
-            self.prior.train()
-            self.mi_estimator.train()
-        else:
-            self.encoder.eval()
-            self.decoder.eval()
-            self.intv_classifier.eval()
-            self.prior.eval()
-            self.mi_estimator.eval()
+        self.encoder.train(training)
+        self.decoder.train(training)
+        self.intv_classifier.train(training)
+        self.prior.train(training)
+        self.mi_estimator.train(training)
 
     def clip_gradients(self):
         nn.utils.clip_grad_norm_(self.encoder.parameters(), 0.5)
@@ -279,3 +293,36 @@ class iCITRIS(nn.Module):
                 other_params.append(param)
 
         return graph_params, counter_params, other_params
+
+
+def gaussian_logprob(noise, log_std):
+    """Compute Gaussian log probability."""
+    residual = (-0.5 * noise.pow(2) - log_std).sum(-1, keepdim=True)
+    return residual - 0.5 * np.log(2 * np.pi) * noise.size(-1)
+
+
+def squash(mu, pi, log_pi):
+    """Apply squashing function.
+    See appendix C from https://arxiv.org/pdf/1812.05905.pdf.
+    """
+    mu = torch.tanh(mu)
+    if pi is not None:
+        pi = torch.tanh(pi)
+    if log_pi is not None:
+        log_pi -= torch.log(F.relu(1 - pi.pow(2)) + 1e-6).sum(-1, keepdim=True)
+    return mu, pi, log_pi
+
+
+def weight_init(m):
+    """Custom weight init for Conv2D and Linear layers."""
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
+        assert m.weight.size(2) == m.weight.size(3)
+        m.weight.data.fill_(0.0)
+        m.bias.data.fill_(0.0)
+        mid = m.weight.size(2) // 2
+        gain = nn.init.calculate_gain('relu')
+        nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
