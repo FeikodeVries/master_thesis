@@ -58,7 +58,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4  # TODO: Default is 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 5
+    num_envs: int = 1
     """the number of parallel game environments"""
     num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
@@ -115,9 +115,7 @@ def make_env(env_id, capture_video, run_name, gamma):
     # TODO: Stack the frames in a rolling manner
     env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
     env = mywrapper.ResizeObservation(env, shape=IMG_SIZE)
-    env = gym.wrappers.FrameStack(env, num_stack=args_citris.framestack)
-    # env = gym.wrappers.FlattenObservation(env)
-
+    env = mywrapper.FrameStack(env, k=args_citris.framestack)
     env = gym.wrappers.ClipAction(env)
 
     env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -201,12 +199,12 @@ class Agent(nn.Module):
         :param x: Unflattened image tensor to be used by iCITRIS
         :return: Flattened causal representation
         """
-        final_processed = None
-        for i, j in enumerate(x):
-            processed = self.unflatten_and_process(j)
-            final_processed = processed if final_processed is None else torch.cat((final_processed, processed))
+        # final_processed = None
+        # for i, j in enumerate(x):
+        #     processed = self.unflatten_and_process(j)
+        #     final_processed = processed if final_processed is None else torch.cat((final_processed, processed))
 
-        causal_rep = self.causal_model.get_causal_rep(final_processed)
+        causal_rep = self.causal_model.get_causal_rep(x)
         causal_rep = torch.flatten(causal_rep, start_dim=1)
 
         return causal_rep
@@ -333,12 +331,18 @@ if __name__ == "__main__":
             print("Pretrained RL model not found")
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    # obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+    # actions = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
+    # logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    # rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    # dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    # values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    obs = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
+    logprobs = torch.zeros((args.num_steps,)).to(device)
+    rewards = torch.zeros((args.num_steps,)).to(device)
+    dones = torch.zeros((args.num_steps,)).to(device)
+    values = torch.zeros((args.num_steps,)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -448,12 +452,12 @@ if __name__ == "__main__":
         #   the system will return zeros
         interventions = torch.where(actions != 0, 1.0, 0.0)
 
-        unflatten_obs = None
-        for ob in obs:
-            processed = agent.unflatten_and_process(ob)
-            unflatten_obs = processed if unflatten_obs is None else torch.concat((unflatten_obs, processed))
+        # unflatten_obs = None
+        # for ob in obs:
+        #     processed = agent.unflatten_and_process(ob)
+        #     unflatten_obs = processed if unflatten_obs is None else torch.concat((unflatten_obs, processed))
 
-        datasets, data_loaders, data_name = load_data_new(args_citris, img_data=unflatten_obs,
+        datasets, data_loaders, data_name = load_data_new(args_citris, img_data=obs,
                                                           interventions=interventions, env_name=args.env_id,
                                                           seq_len=args_citris.seq_len)
 
