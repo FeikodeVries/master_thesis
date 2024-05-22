@@ -15,14 +15,17 @@ from torch.utils.tensorboard import SummaryWriter
 import pathlib
 from gymnasium import spaces
 from statistics import mean
+import torch.nn.functional as F
 
 from my_files.datahandling import load_data_new
 import my_files.datahandling as dh
 from my_files.new_active_icitris import iCITRIS
 from my_files import custom_env_wrappers as mywrapper
+from my_files.encoder_decoder import make_encoder, make_decoder
 import my_files.utils as utils
+import my_files.actor_critic as actor_critic
 from gymnasium.wrappers import PixelObservationWrapper, ResizeObservation, FrameStack
-
+from my_files.PPO_AE import PPO_AE
 
 @dataclass
 class Args:
@@ -95,7 +98,7 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-
+LOG_FREQ = 10000
 IMG_SIZE = 84
 # TODO: IMG_Size has to have a whole number as output when calculating x**n = IMG_SIZE / n
 #  Otherwise there are issues with decoder resizing, other possible image sizes are: 64: n=4, 96: n=6
@@ -233,9 +236,10 @@ class Agent(nn.Module):
         # Prevent the gradient from flowing through the policy
         # TODO: Make the process the same as in SAC+AE
         x = x.unsqueeze(0)
-        causal_rep = self.get_causal_rep_from_img(x).detach()
+        # causal_rep = self.get_causal_rep_from_img(x).detach()
+        latent = self.causal_model.encoder(x).detach()
         # combined_rep = torch.concat((causal_rep, x), dim=1)  # Give the causal data as context for the pixel data
-        action_mean = self.actor_mean(causal_rep)
+        action_mean = self.actor_mean(latent)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -311,6 +315,7 @@ if __name__ == "__main__":
     args.num_pretraining = args_citris.pretraining_size // args.batch_size
     CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
                                     low=-float("inf"), high=float("inf"), dtype=np.float32)
+
     # END MYCODE
 
     # TRY NOT TO MODIFY: seeding
@@ -324,7 +329,10 @@ if __name__ == "__main__":
     # TODO: Removed the possibility of syncing multiple environments
     envs = make_env(args.env_id, args.capture_video, run_name, args.gamma)
 
-    agent = Agent(envs).to(device)
+    # agent = Agent(envs).to(device)
+    agent = PPO_AE(obs_shape=envs.observation_space.shape, action_shape=envs.action_space.shape,
+                   device='cuda', hidden_dim=1024)
+
     if args.load_model:
         path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/ppo_continuous_action.cleanrl_model'
         if os.path.isfile(path):
@@ -354,21 +362,21 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
-    # Get the different params from the causal model
-    citris_graph_params, citris_counter_params, citris_other_params = agent.causal_model.get_params()
-    # Remove the causal model params from the PPO agent
-    agent_params = [param for name, param in agent.named_parameters() if not name.startswith('causal_model')]
-
-    # TODO: Potentially use AdamW --> optimise the values of the learning rate scheduler
-    optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
-                            {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
-                            {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
-                            {'params': citris_other_params}], lr=args.learning_rate, weight_decay=0.0)
-    scheduler = utils.CosineWarmupScheduler(optimizer,
-                                            warmup=[200 * args_citris.warmup, 2 * args_citris.warmup,
-                                                     2 * args_citris.warmup],
-                                            offset=[10000, 0, 0],
-                                            max_iters=args_citris.max_iters)
+    # # Get the different params from the causal model
+    # citris_graph_params, citris_counter_params, citris_other_params = agent.causal_model.get_params()
+    # # Remove the causal model params from the PPO agent
+    # agent_params = [param for name, param in agent.named_parameters() if not name.startswith('causal_model')]
+    #
+    # # TODO: Potentially use AdamW --> optimise the values of the learning rate scheduler
+    # optimizer = optim.Adam([{'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5},
+    #                         {'params': citris_graph_params, 'lr': args_citris.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
+    #                         {'params': citris_counter_params, 'lr': 2 * args_citris.lr, 'weight_decay': 1e-4},
+    #                         {'params': citris_other_params}], lr=args.learning_rate, weight_decay=0.0)
+    # scheduler = utils.CosineWarmupScheduler(optimizer,
+    #                                         warmup=[200 * args_citris.warmup, 2 * args_citris.warmup,
+    #                                                  2 * args_citris.warmup],
+    #                                         offset=[10000, 0, 0],
+    #                                         max_iters=args_citris.max_iters)
 
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
@@ -384,7 +392,7 @@ if __name__ == "__main__":
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+            # optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
             global_step += args.num_envs

@@ -225,7 +225,7 @@ class PixelEncoder(nn.Module):
 
         out = torch.tanh(h_norm)
         self.outputs['tanh'] = out
-
+        # TODO: Make Variational
         return out
 
     def copy_conv_weights_from(self, source):
