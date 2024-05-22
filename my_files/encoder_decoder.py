@@ -172,10 +172,11 @@ OUT_DIM = {2: 39, 4: 35, 6: 31}
 
 class PixelEncoder(nn.Module):
     """Convolutional encoder of pixels observations."""
-    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32):
+    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32, variational=True):
         super().__init__()
+        self.variational = variational
+        self.scale_factor = nn.Parameter(torch.zeros(feature_dim, ))
 
-        # TODO: This assert doesn't work because the observation space is flattened
         assert len(obs_shape) == 3
 
         self.feature_dim = feature_dim

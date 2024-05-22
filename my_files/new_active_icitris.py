@@ -18,6 +18,7 @@ class iCITRIS(nn.Module):
                  num_causal_vars,
                  run_name,
                  obs_shape,
+                 action_shape,
                  width=64,
                  graph_learning_method="ENCO",
                  c_in=3,
@@ -90,18 +91,26 @@ class iCITRIS(nn.Module):
         self.beta_mi_estimator = beta_mi_estimator
         self.beta_classifier = beta_classifier
         self.beta_t1 = beta_t1
+        self.log_std_min = -10
+        self.log_std_max = 2
 
-        # TODO: Clean up
+        # TODO: Integrate new Autoencoder, test, and clean up
         # Encoder-Decoder init
-        self.encoder = coding.make_encoder(encoder_type='pixel', obs_shape=obs_shape, feature_dim=50,
+        self.encoder = coding.make_encoder(encoder_type='pixel', obs_shape=obs_shape, feature_dim=num_latents,
                                            num_layers=4, num_filters=32).to('cuda')
-        self.decoder = coding.make_decoder(decoder_type='pixel', obs_shape=obs_shape, feature_dim=50, num_layers=4,
-                                           num_filters=32).to('cuda')
+        self.decoder = coding.make_decoder(decoder_type='pixel', obs_shape=obs_shape, feature_dim=num_latents,
+                                           num_layers=4, num_filters=32).to('cuda')
         self.decoder.apply(weight_init)
 
         self.encoder_optimiser = torch.optim.Adam(self.encoder.parameters(), lr=1e-3)
         self.decoder_optimiser = torch.optim.Adam(self.decoder.parameters(), lr=1e-3,
                                                   weight_decay=0.0)
+
+        self.trunk = nn.Sequential(
+            nn.Linear(self.encoder.feature_dim, c_hid), nn.ReLU(),
+            nn.Linear(c_hid, c_hid), nn.ReLU(),
+            nn.Linear(c_hid, 2 * action_shape[0])
+        )
 
         # self.encoder = coding.Encoder(num_latents=num_latents,
         #                               c_hid=c_hid,
@@ -252,12 +261,18 @@ class iCITRIS(nn.Module):
         :param x: batch of unflattened image tensors
         :return:
         """
-        z_mean, z_logstd = self.encoder(x)
+        latent_obs = self.encoder(x, detach=False).permute(1, 0)
+        # TODO: self.trunk already kind of maps the latent space to the action space, but I need the latents to be
+        #  mapped to the causal representation
+        z_mean, z_logstd = self.trunk(latent_obs).chunk(2, dim=-1)
+
+        # constrain log_std inside [log_std_min, log_std_max]
+        z_logstd = torch.tanh(z_logstd)
+        z_logstd = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (z_logstd + 1)
+
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
-        # Get latent assignment to causal vars in binary
-        # TODO: Usually the output of the encoder is provided as input to the neural net, as the encoder is trained
-        #  using the causal logic
-        # # TODO: Move the latent assignment from binary to probability and test that for training
+
+        # Get latent assignment to causal vars
         target_assignment = self.prior.get_target_assignment(hard=False)
         # Assign latent vals to their respective causal var
         latent_causal_assignment = [target_assignment * z_sample[i][:, None] for i in range(len(z_sample))]

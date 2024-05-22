@@ -192,7 +192,8 @@ class Agent(nn.Module):
                                     run_name=run_name, lambda_sparse=args_citris.lambda_sparse,
                                     act_fn=args_citris.act_fn, beta_classifier=args_citris.beta_classifier,
                                     beta_mi_estimator=args_citris.beta_mi_estimator, beta_t1=args_citris.beta_t1,
-                                    autoregressive_prior=args_citris.autoregressive_prior)
+                                    autoregressive_prior=args_citris.autoregressive_prior,
+                                    action_shape=envs.action_space.shape)
 
     def get_causal_rep_from_img(self, x):
         """
@@ -230,6 +231,8 @@ class Agent(nn.Module):
 
     def get_action_and_value(self, x, action=None, dropout_prob=0.1):
         # Prevent the gradient from flowing through the policy
+        # TODO: Make the process the same as in SAC+AE
+        x = x.unsqueeze(0)
         causal_rep = self.get_causal_rep_from_img(x).detach()
         # combined_rep = torch.concat((causal_rep, x), dim=1)  # Give the causal data as context for the pixel data
         action_mean = self.actor_mean(causal_rep)
@@ -275,7 +278,7 @@ if __name__ == "__main__":
     parser.add_argument('--dropout_update', type=float, default=0.01)    # TODO: Optimise hyperparam (default: .1)
     parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
     parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=64)          # TODO: Optimise hyperparam --> Default: 32
+    parser.add_argument('--num_latents', type=int, default=50)          # TODO: Optimise hyperparam --> Default: 32
     parser.add_argument('--classifier_lr', type=float, default=4e-3)
     parser.add_argument('--classifier_momentum', type=float, default=0.0)
     parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
@@ -331,12 +334,6 @@ if __name__ == "__main__":
             print("Pretrained RL model not found")
 
     # ALGO Logic: Storage setup
-    # obs = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-    # actions = torch.zeros((args.num_steps, args.num_envs) + envs.observation_space.shape).to(device)
-    # logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    # rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    # dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    # values = torch.zeros((args.num_steps, args.num_envs)).to(device)
     obs = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps,)).to(device)
