@@ -5,8 +5,7 @@ import torch.nn.functional as F
 import copy
 import math
 
-import utils
-from encoder_decoder import make_encoder, make_decoder
+from my_files.encoder_decoder import make_encoder, make_decoder
 
 LOG_FREQ = 10000
 
@@ -45,9 +44,7 @@ class Actor(nn.Module):
 
         # constrain log_std inside [log_std_min, log_std_max]
         log_std = torch.tanh(log_std)
-        log_std = self.log_std_min + 0.5 * (
-            self.log_std_max - self.log_std_min
-        ) * (log_std + 1)
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (log_std + 1)
 
         self.outputs['mu'] = mu
         self.outputs['std'] = log_std.exp()
@@ -83,20 +80,28 @@ class Actor(nn.Module):
 
 class QFunction(nn.Module):
     """MLP for q-function."""
-    def __init__(self, obs_dim, action_dim, hidden_dim):
+    # TODO: Action is not always available in PPO, see if the system works without the action information here
+
+    def __init__(self, obs_dim, action_dim=None, hidden_dim=1024):
         super().__init__()
 
+        # self.trunk = nn.Sequential(
+        #     nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
+        #     nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        #     nn.Linear(hidden_dim, 1)
+        # )
+
         self.trunk = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
 
     def forward(self, obs, action):
-        assert obs.size(0) == action.size(0)
+        # assert obs.size(0) == action.size(0)
 
-        obs_action = torch.cat([obs, action], dim=1)
-        return self.trunk(obs_action)
+        # obs_action = torch.cat([obs, action], dim=1)
+        return self.trunk(obs)
 
 
 class Critic(nn.Module):
@@ -112,27 +117,17 @@ class Critic(nn.Module):
             num_filters
         )
 
-        self.Q1 = QFunction(
-            self.encoder.feature_dim, action_shape[0], hidden_dim
-        )
-        self.Q2 = QFunction(
-            self.encoder.feature_dim, action_shape[0], hidden_dim
-        )
+        self.critic_net = QFunction(self.encoder.feature_dim, action_shape[0], hidden_dim)
 
         self.outputs = dict()
         self.apply(weight_init)
 
     def forward(self, obs, action, detach_encoder=False):
-        # detach_encoder allows to stop gradient propogation to encoder
+        # detach_encoder allows to stop gradient propagation to encoder
         obs = self.encoder(obs, detach=detach_encoder)
+        value = self.critic_net(obs, action)
 
-        q1 = self.Q1(obs, action)
-        q2 = self.Q2(obs, action)
-
-        self.outputs['q1'] = q1
-        self.outputs['q2'] = q2
-
-        return q1, q2
+        return value
 
     def log(self, L, step, log_freq=LOG_FREQ):
         if step % log_freq != 0:

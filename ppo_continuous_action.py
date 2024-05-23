@@ -140,41 +140,6 @@ class Agent(nn.Module):
     """
     def __init__(self, envs):
         super().__init__()
-        # self.critic = nn.Sequential(
-        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, 1), std=1.0),
-        # )
-        # self.actor_mean = nn.Sequential(
-        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, 64)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.1),
-        # )
-
-        # self.critic = nn.Sequential(
-        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 256)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(256, 128)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(128, 128)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(128, 1), std=1.0),
-        # )
-        # self.actor_mean = nn.Sequential(
-        #     layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod()+(3*IMG_SIZE*IMG_SIZE), 256)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(256, 128)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(128, 128)),
-        #     nn.Tanh(),
-        #     layer_init(nn.Linear(128, np.prod(envs.single_action_space.shape)), std=0.1),
-        # )
-
-        # TODO: Sometimes, the actor MLP returns NAN?
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
             # layer_init(nn.Linear(np.array(CAUSAL_OBSERVATION.shape).prod(), 1024)), nn.ReLU(),
@@ -306,7 +271,6 @@ if __name__ == "__main__":
     parser.add_argument('--action_repeat', type=int, default=2)
     parser.add_argument('--framestack', type=int, default=3)
     parser.add_argument('--max_iters', type=int, default=100000)
-    # TODO: There is a bug in rgb TRUE, it absolutely tanks performance
 
     datahandler = dh.DataHandling()
 
@@ -343,7 +307,7 @@ if __name__ == "__main__":
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps,) + envs.action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps,)).to(device)
     rewards = torch.zeros((args.num_steps,)).to(device)
     dones = torch.zeros((args.num_steps,)).to(device)
@@ -405,18 +369,18 @@ if __name__ == "__main__":
                 if (step % args_citris.action_repeat) == 0:
                     action, logprob, _, value = agent.get_action_and_value(x=next_obs,
                                                                            dropout_prob=args_citris.dropout_update)
+                    values[step] = value.flatten()
                 else:
                     action = actions[step - 1]
                     logprob = logprobs[step - 1]
-                    value = values[step-1][None, :]
-
-                values[step] = value.flatten()
+                    value = values[step-1]
+                    values[step] = value
             actions[step] = action
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done = np.logical_or(terminations, truncations)
+            next_done = torch.any(torch.tensor(np.array([terminations, truncations])))
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
@@ -427,7 +391,7 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
-        agent.causal_model.set_train(training=False)
+        agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -482,74 +446,79 @@ if __name__ == "__main__":
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               action=b_actions[mb_inds],
                                                                               dropout_prob=args_citris.dropout_update)
-                logratio = newlogprob - b_logprobs[mb_inds]
 
-                # TODO: Clip the logratio to a range of -0.02 and 0.02
-                logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.02))
-                logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.02))
-
-                ratio = logratio.exp()
-
-                with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
-
-                mb_advantages = b_advantages[mb_inds]
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
-                # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                old_approx_kl, approx_kl, pg_loss = agent.policy_loss(newlogprob, b_logprobs, mb_inds, args.clip_coef,
+                                                                      args.norm_adv, clipfracs, b_advantages)
+                # logratio = newlogprob - b_logprobs[mb_inds]
+                #
+                # # # TODO: Clip the logratio to a range of -0.02 and 0.02
+                # # logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.02))
+                # # logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.02))
+                #
+                # ratio = logratio.exp()
+                #
+                # with torch.no_grad():
+                #     # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                #     old_approx_kl = (-logratio).mean()
+                #     approx_kl = ((ratio - 1) - logratio).mean()
+                #     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                #
+                # mb_advantages = b_advantages[mb_inds]
+                # if args.norm_adv:
+                #     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                #
+                # # Policy loss
+                # pg_loss1 = -mb_advantages * ratio
+                # pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                # pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
-                newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                # newvalue = newvalue.view(-1)
+                # if args.clip_vloss:
+                #     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                #     v_clipped = b_values[mb_inds] + torch.clamp(
+                #         newvalue - b_values[mb_inds],
+                #         -args.clip_coef,
+                #         args.clip_coef,
+                #     )
+                #     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                #     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                #     v_loss = 0.5 * v_loss_max.mean()
+                # else:
+                #     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                v_loss = agent.value_loss(newvalue, b_returns, b_values, mb_inds, args.clip_coef, args.clip_vloss)
 
                 entropy_loss = entropy.mean()
                 # MYCODE
                 # Calculate citris loss
-                citris_loss, citris_logs = agent.causal_model.get_loss(batch=img_pairs,
-                                                                       target=targets,
-                                                                       global_step=global_step,
-                                                                       epoch=epoch,
-                                                                       data_loader=data_loader)
+                # citris_loss, citris_logs = agent.causal_model.get_loss(batch=img_pairs,
+                #                                                        target=targets,
+                #                                                        global_step=global_step,
+                #                                                        epoch=epoch,
+                #                                                        data_loader=data_loader)
                 # Save all intermediate values for more accurate tracking of performance
-                for key, value in citris_logs.items():
-                    if key == 'mi_estimator_factor':
-                        citris_track_logs[key].append(value)
-                    else:
-                        citris_track_logs[key].append(value.item())
-                citris_track_loss.append(citris_loss.item())
+                # for key, value in citris_logs.items():
+                #     if key == 'mi_estimator_factor':
+                #         citris_track_logs[key].append(value)
+                #     else:
+                #         citris_track_logs[key].append(value.item())
+                # citris_track_loss.append(citris_loss.item())
                 # To prevent an overflow of saved images
                 data_loader += 1
 
-                # loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + citris_loss
-                loss = citris_loss
-                agent.causal_model.set_train(training=True)
-                optimizer.zero_grad()
-                loss.backward()
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                agent.update_ppo(loss)
+                # loss = citris_loss
+                # agent.causal_model.set_train(training=True)
+                # optimizer.zero_grad()
+                # loss.backward()
                 # TODO: This probably already stabilises the child models, but I'm not fully sure
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                # nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 # agent.causal_model.clip_gradients()
-                optimizer.step()
+                # optimizer.step()
 
             # TODO: This should be correct for the scheduler
-            scheduler.step()
+            # scheduler.step()
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 

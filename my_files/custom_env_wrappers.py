@@ -495,7 +495,6 @@ class FrameStack(gym.Wrapper):
             shape=((shp[0] * k,) + shp[1:]),
             dtype=env.observation_space.dtype
         )
-        # self._max_episode_steps = env._max_episode_steps
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         obs, info = self.env.reset(seed=seed, options=options)
@@ -504,9 +503,9 @@ class FrameStack(gym.Wrapper):
         return self._get_obs(), info
 
     def step(self, action):
-        obs, reward, done, info = self.env.step(action)
+        obs, reward, done, truncated, info = self.env.step(action)
         self._frames.append(obs)
-        return self._get_obs(), reward, done, info
+        return self._get_obs(), reward, done, truncated, info
 
     def _get_obs(self):
         assert len(self._frames) == self._k

@@ -4,9 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
 
-from encoder_decoder import make_encoder, make_decoder
-import utils as utils
-import actor_critic as actor_critic
+from my_files.encoder_decoder import make_encoder, make_decoder
+from my_files import utils, actor_critic
 
 LOG_FREQ = 10000
 
@@ -51,7 +50,8 @@ class PPO_AE(object):
         self.critic_target_update_freq = critic_target_update_freq
         self.decoder_update_freq = decoder_update_freq
         self.decoder_latent_lambda = decoder_latent_lambda
-        self.actor_logstd = nn.Parameter(torch.zeros(1, action_shape))
+
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(action_shape)))
 
         self.actor = actor_critic.Actor(
             obs_shape, action_shape, hidden_dim, encoder_type,
@@ -64,18 +64,9 @@ class PPO_AE(object):
             encoder_feature_dim, num_layers, num_filters
         ).to(device)
 
-        self.critic_target = actor_critic.Critic(
-            obs_shape, action_shape, hidden_dim, encoder_type,
-            encoder_feature_dim, num_layers, num_filters
-        ).to(device)
-
-        self.critic_target.load_state_dict(self.critic.state_dict())
-
         # tie encoders between actor and critic
         self.actor.encoder.copy_conv_weights_from(self.critic.encoder)
 
-        self.log_alpha = torch.tensor(np.log(init_temperature)).to(device)
-        self.log_alpha.requires_grad = True
         # set target entropy to -|A|
         self.target_entropy = -np.prod(action_shape)
 
@@ -109,12 +100,7 @@ class PPO_AE(object):
             self.critic.parameters(), lr=critic_lr, betas=(critic_beta, 0.999)
         )
 
-        self.log_alpha_optimizer = torch.optim.Adam(
-            [self.log_alpha], lr=alpha_lr, betas=(alpha_beta, 0.999)
-        )
-
         self.train()
-        self.critic_target.train()
 
     def train(self, training=True):
         self.training = training
@@ -123,136 +109,59 @@ class PPO_AE(object):
         if self.decoder is not None:
             self.decoder.train(training)
 
-    @property
-    def alpha(self):
-        return self.log_alpha.exp()
-
-    def select_action(self, obs):
-        with torch.no_grad():
-            obs = torch.FloatTensor(obs).to(self.device)
-            obs = obs.unsqueeze(0)
-            mu, _, _, _ = self.actor(obs, compute_pi=False, compute_log_pi=False)
-            return mu.cpu().data.numpy().flatten()
-
-    def sample_action(self, obs):
-        with torch.no_grad():
-            obs = torch.FloatTensor(obs).to(self.device)
-            obs = obs.unsqueeze(0)
-            mu, pi, _, _ = self.actor(obs, compute_log_pi=False)
-            return pi.cpu().data.numpy().flatten()
-
-    def get_value(self, obs):
-        return self.critic(obs)
+    def get_value(self, obs, action=None):
+        obs = obs.unsqueeze(0)
+        return self.critic(obs, action)
 
     def get_action_and_value(self, x, action=None, dropout_prob=0.1):
         # Prevent the gradient from flowing through the policy
-        latent = self.actor.encoder(x).detach()
-        action_mean, _, _, _ = self.actor(latent)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
+        obs = x.unsqueeze(0)
+        action_mean, _, _, action_logstd = self.actor(obs)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
             action = utils.mask_actions(action, dropout_prob=dropout_prob)
 
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x)
+        return torch.flatten(action), probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, action)
 
-    def update_critic(self, obs, action, reward, next_obs, not_done, L, step):
+    def policy_loss(self, newlogprob, b_logprobs, mb_inds, clip_coef, norm_adv, clipfracs, b_advantages):
+        logratio = newlogprob - b_logprobs[mb_inds]
+        ratio = logratio.exp()
+
         with torch.no_grad():
-            _, policy_action, log_pi, _ = self.actor(next_obs)
-            target_Q1, target_Q2 = self.critic_target(next_obs, policy_action)
-            target_V = torch.min(target_Q1,
-                                 target_Q2) - self.alpha.detach() * log_pi
-            target_Q = reward + (not_done * self.discount * target_V)
+            # calculate approx_kl http://joschu.net/blog/kl-approx.html
+            old_approx_kl = (-logratio).mean()
+            approx_kl = ((ratio - 1) - logratio).mean()
+            clipfracs += [((ratio - 1.0).abs() > clip_coef).float().mean().item()]
 
-        # get current Q estimates
-        current_Q1, current_Q2 = self.critic(obs, action)
-        critic_loss = F.mse_loss(current_Q1,
-                                 target_Q) + F.mse_loss(current_Q2, target_Q)
-        L.log('train_critic/loss', critic_loss, step)
+        mb_advantages = b_advantages[mb_inds]
+        if norm_adv:
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-        # Optimize the critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
+        # Policy loss
+        pg_loss1 = -mb_advantages * ratio
+        pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+        pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-        self.critic.log(L, step)
+        return old_approx_kl, approx_kl, pg_loss
 
-    def update_actor_and_alpha(self, obs, L, step):
-        # detach encoder, so we don't update it with the actor loss
-        _, pi, log_pi, log_std = self.actor(obs, detach_encoder=True)
-        actor_Q1, actor_Q2 = self.critic(obs, pi, detach_encoder=True)
+    def value_loss(self, newvalue, b_returns, b_values, mb_inds, clip_coef, clip_vloss):
+        newvalue = newvalue.view(-1)
+        if clip_vloss:
+            v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+            v_clipped = b_values[mb_inds] + torch.clamp(newvalue - b_values[mb_inds], -clip_coef, clip_coef,)
+            v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+            v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+            v_loss = 0.5 * v_loss_max.mean()
+        else:
+            v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-        actor_Q = torch.min(actor_Q1, actor_Q2)
-        actor_loss = (self.alpha.detach() * log_pi - actor_Q).mean()
+        return v_loss
 
-        L.log('train_actor/loss', actor_loss, step)
-        L.log('train_actor/target_entropy', self.target_entropy, step)
-        entropy = 0.5 * log_std.shape[1] * (1.0 + np.log(2 * np.pi)
-                                            ) + log_std.sum(dim=-1)
-        L.log('train_actor/entropy', entropy.mean(), step)
-
-        # optimize the actor
+    def update_ppo(self, loss):
         self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
-
-        self.actor.log(L, step)
-
-        self.log_alpha_optimizer.zero_grad()
-        alpha_loss = (self.alpha *
-                      (-log_pi - self.target_entropy).detach()).mean()
-        L.log('train_alpha/loss', alpha_loss, step)
-        L.log('train_alpha/value', self.alpha, step)
-        alpha_loss.backward()
-        self.log_alpha_optimizer.step()
-
-    def update_decoder(self, obs, target_obs, L, step):
-        h = self.critic.encoder(obs)
-
-        if target_obs.dim() == 4:
-            # preprocess images to be in [-0.5, 0.5] range
-            target_obs = utils.preprocess_obs(target_obs)
-        rec_obs = self.decoder(h)
-        rec_loss = F.mse_loss(target_obs, rec_obs)
-
-        # add L2 penalty on latent representation
-        # see https://arxiv.org/pdf/1903.12436.pdf
-        latent_loss = (0.5 * h.pow(2).sum(1)).mean()
-
-        loss = rec_loss + self.decoder_latent_lambda * latent_loss
-        self.encoder_optimizer.zero_grad()
-        self.decoder_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
         loss.backward()
-
-        self.encoder_optimizer.step()
-        self.decoder_optimizer.step()
-        L.log('train_ae/ae_loss', loss, step)
-
-        self.decoder.log(L, step, log_freq=LOG_FREQ)
-
-    def update(self, replay_buffer, L, step):
-        # TODO: Change the update function to be PPO compatible
-        obs, action, reward, next_obs, not_done = replay_buffer.sample()
-
-        L.log('train/batch_reward', reward.mean(), step)
-
-        self.update_critic(obs, action, reward, next_obs, not_done, L, step)
-
-        if step % self.actor_update_freq == 0:
-            self.update_actor_and_alpha(obs, L, step)
-
-        if step % self.critic_target_update_freq == 0:
-            utils.soft_update_params(
-                self.critic.Q1, self.critic_target.Q1, self.critic_tau
-            )
-            utils.soft_update_params(
-                self.critic.Q2, self.critic_target.Q2, self.critic_tau
-            )
-            utils.soft_update_params(
-                self.critic.encoder, self.critic_target.encoder,
-                self.encoder_tau
-            )
-
-        if self.decoder is not None and step % self.decoder_update_freq == 0:
-            self.update_decoder(obs, obs, L, step)
+        self.actor_optimizer.step()
+        self.critic_optimizer.step()
