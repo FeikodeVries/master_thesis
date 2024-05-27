@@ -113,19 +113,28 @@ class PPO_AE(object):
         return self.critic(obs, action, detach_encoder=detach)
 
     def get_action_and_value(self, x, action=None, dropout_prob=0.1):
-        if action is None:
-            detach = False
-            # obs = self.actor(x, compute_log_pi=False)
-            action_mean, action, _, logstd = self.actor(x, compute_log_pi=False)
-        else:
-            detach = True
-            # obs = self.actor(x, detach_encoder=detach)
-            action_mean, _, _, logstd = self.actor(x, compute_log_pi=False)
-        action_std = torch.exp(logstd)
+        # TODO: actor output is probably causing issues with the PPO system
+        action_mean, _, _, _ = self.actor(x, compute_log_pi=False, detach_encoder=True)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
 
+        if action is None:
+            # detach = False
+            # action_mean, _, _, _ = self.actor(x, compute_log_pi=False)
+            # action_logstd = self.actor_logstd.expand_as(action_mean)
+            # action_std = torch.exp(action_logstd)
+            # probs = Normal(action_mean, action_std)
+            action = probs.sample()
+        # else:
+        #     detach = True
+        #     action_mean, _, _, _ = self.actor(x, detach_encoder=True)
+        #     action_logstd = self.actor_logstd.expand_as(action_mean)
+        #     action_std = torch.exp(action_logstd)
+        #     probs = Normal(action_mean, action_std)
+
         return torch.flatten(action), probs.log_prob(action).sum(1), probs.entropy().sum(1), \
-               self.get_value(x, action, detach=detach)
+               self.get_value(x, action, detach=True)
         # action_mean = self.actor(x, compute_log_pi=False, detach_encoder=True)
         # action_logstd = self.actor_logstd.expand_as(action_mean)
         # action_std = torch.exp(action_logstd)
@@ -140,9 +149,9 @@ class PPO_AE(object):
     def policy_loss(self, newlogprob, b_logprobs, mb_inds, clip_coef, norm_adv, clipfracs, b_advantages):
         logratio = newlogprob - b_logprobs[mb_inds]
 
-        # TODO: Clip logratio to range --> this just becomes 0 after a while? --> also happens to clipfrac
-        logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.5))
-        logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.5))
+        # TODO: Clip logratio to range, the max. approx_kl becomes 0.3 * 0.1
+        logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.3))
+        logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.3))
 
         ratio = logratio.exp()
 
@@ -179,9 +188,9 @@ class PPO_AE(object):
     def rec_loss(self, obs, target_obs):
         h = self.critic.encoder(obs)
 
-        if target_obs.dim() == 4:
+        # if target_obs.dim() == 4:
             # preprocess images to be in [-0.5, 0.5] range
-            target_obs = utils.preprocess_obs(target_obs)
+        #    target_obs = utils.preprocess_obs(target_obs)
         rec_obs = self.decoder(h)
         rec_loss = F.mse_loss(target_obs, rec_obs)
 

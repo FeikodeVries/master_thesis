@@ -26,10 +26,11 @@ class Actor(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
+        # TODO: More of the cleanrl type network
         self.trunk = nn.Sequential(
-            nn.Linear(self.encoder.feature_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, 2 * action_shape[0])
+            layer_init(nn.Linear(self.encoder.feature_dim, hidden_dim)), nn.ReLU(),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+            layer_init(nn.Linear(hidden_dim, 2 * action_shape[0]), std=0.01),
         )
 
         # self.trunk = nn.Sequential(
@@ -90,9 +91,9 @@ class QFunction(nn.Module):
         super().__init__()
 
         self.trunk = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            layer_init(nn.Linear(obs_dim + action_dim, hidden_dim)), nn.ReLU(),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
+            layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
         # self.trunk = nn.Sequential(
@@ -179,3 +180,7 @@ def weight_init(m):
         gain = nn.init.calculate_gain('relu')
         nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
 
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer

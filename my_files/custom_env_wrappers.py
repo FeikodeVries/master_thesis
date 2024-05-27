@@ -9,6 +9,7 @@ from gymnasium import spaces
 import cv2
 from collections import deque
 from gymnasium.error import DependencyNotInstalled
+import torch
 
 STATE_KEY = "state"
 
@@ -286,8 +287,10 @@ class ResizeObservation(gym.ObservationWrapper, gym.utils.RecordConstructorArgs)
 
         observation = observation['pixels']
         observation = cv2.resize(observation, self.shape[::-1], interpolation=cv2.INTER_AREA)
+        # TODO: Resize with pytorch to keep correct dimensions
+        observation = torch.from_numpy(observation).permute(2, 0, 1).numpy()
 
-        return observation.reshape(self.observation_space.shape)
+        return observation
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         obs, info = self.env.reset(seed=seed, options=options)
@@ -305,17 +308,19 @@ class FrameStack(gym.Wrapper):
             low=0,
             high=1,
             shape=((shp[0] * k,) + shp[1:]),
-            dtype=env.observation_space.dtype
+            dtype=float
         )
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         obs, info = self.env.reset(seed=seed, options=options)
+        obs = obs / 255.
         for _ in range(self._k):
             self._frames.append(obs)
         return self._get_obs(), info
 
     def step(self, action):
         obs, reward, done, truncated, info = self.env.step(action)
+        obs = obs / 255.
         self._frames.append(obs)
         return self._get_obs(), reward, done, truncated, info
 

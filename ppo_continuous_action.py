@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
+import matplotlib.pyplot as plt
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
@@ -412,7 +413,7 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        # b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
         b_advantages = advantages.reshape(-1)
@@ -437,7 +438,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=obs[mb_inds],
                                                                               action=b_actions[mb_inds],
                                                                               dropout_prob=args_citris.dropout_update)
 
@@ -451,6 +452,29 @@ if __name__ == "__main__":
                 rec_loss, rec_obs = agent.rec_loss(obs[mb_inds], obs[mb_inds])
 
                 entropy_loss = entropy.mean()
+
+                if epoch == 0 and start == 0:
+                    # Save image of an original + reconstruction every policy rollout
+                    path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+
+                    original_imgs = torch.split(obs[mb_inds][0], 3)
+                    original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
+                    rec_imgs = torch.split(rec_obs[0], 3)
+
+                    rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
+
+                    cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
+                                                                                       cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
+                                                                                       cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255 * original_imgs[2],
+                                                                                       cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[0],
+                                                                                       cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[1],
+                                                                                       cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
+                                                                                       cv2.COLOR_RGB2BGR))
                 # MYCODE
                 # Calculate citris loss
                 # citris_loss, citris_logs = agent.causal_model.get_loss(batch=img_pairs,

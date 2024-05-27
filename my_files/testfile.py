@@ -24,6 +24,8 @@ from torch.distributions.normal import Normal
 probs = Normal(-1, 1)
 action = torch.tensor([0, 0, 0, 0, 0, 0])
 probs.log_prob(action).sum(1)
+for i in range(3):
+    print(i)
 
 # NON FUNCTIONAL BUT USEFUL RESUME TRAINING CODE
 # if args_citris.resume_training:
