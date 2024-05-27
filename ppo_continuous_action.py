@@ -16,7 +16,7 @@ import pathlib
 from gymnasium import spaces
 from statistics import mean
 import torch.nn.functional as F
-
+import cv2
 from my_files.datahandling import load_data_new
 import my_files.datahandling as dh
 from my_files.new_active_icitris import iCITRIS
@@ -63,7 +63,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 512
+    num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -71,7 +71,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 128  # TODO: Default(32) Could be that the running average from BatchNorm is unstable due to very small minibatches?
+    num_minibatches: int = 16  # TODO: Default(32) Could be that the running average from BatchNorm
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -104,28 +104,27 @@ IMG_SIZE = 84
 #  Otherwise there are issues with decoder resizing, other possible image sizes are: 64: n=4, 96: n=6
 
 
-def make_env(env_id, capture_video, run_name, gamma):
-    # def thunk():
-    # if capture_video and idx == 0:
-    if capture_video:
-        env = gym.make(env_id, render_mode="rgb_array")
-        env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-    else:
-        env = gym.make(env_id, render_mode="rgb_array")
-    env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-    env = gym.wrappers.RecordEpisodeStatistics(env)
+def make_env(env_id, idx, capture_video, run_name, gamma):
+    def thunk():
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id, render_mode="rgb_array")
+        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+        env = gym.wrappers.RecordEpisodeStatistics(env)
 
-    # TODO: Stack the frames in a rolling manner
-    env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
-    env = mywrapper.ResizeObservation(env, shape=IMG_SIZE)
-    env = mywrapper.FrameStack(env, k=args_citris.framestack)
-    env = gym.wrappers.ClipAction(env)
+        # TODO: Stack the frames in a rolling manner
+        env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
+        env = mywrapper.ResizeObservation(env, shape=IMG_SIZE)
+        env = mywrapper.FrameStack(env, k=args_citris.framestack)
+        env = gym.wrappers.ClipAction(env)
 
-    env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-    env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-    return env
+        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        return env
 
-    # return thunk
+    return thunk
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -290,11 +289,12 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # TODO: Removed the possibility of syncing multiple environments
-    envs = make_env(args.env_id, args.capture_video, run_name, args.gamma)
-
+    # envs = make_env(args.env_id, args.capture_video, run_name, args.gamma)
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
+    )
     # agent = Agent(envs).to(device)
-    agent = PPO_AE(obs_shape=envs.observation_space.shape, action_shape=envs.action_space.shape,
+    agent = PPO_AE(obs_shape=envs.single_observation_space.shape, action_shape=envs.single_action_space.shape,
                    device='cuda', hidden_dim=1024)
 
     if args.load_model:
@@ -306,8 +306,8 @@ if __name__ == "__main__":
             print("Pretrained RL model not found")
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps,) + envs.observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps,) + envs.action_space.shape).to(device)
+    obs = torch.zeros((args.num_steps,) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps,) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps,)).to(device)
     rewards = torch.zeros((args.num_steps,)).to(device)
     dones = torch.zeros((args.num_steps,)).to(device)
@@ -380,7 +380,7 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done = torch.any(torch.tensor(np.array([terminations, truncations])))
+            next_done = np.array(bool(np.logical_or(terminations, truncations)))
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
@@ -394,7 +394,10 @@ if __name__ == "__main__":
         agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            # TODO: This allows for integrating the action into the critic network
+            next_action, _, _, next_value = agent.get_action_and_value(next_obs)
+            next_value = next_value.reshape(1, -1)
+            # next_value = agent.get_value(next_obs).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -409,9 +412,9 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        b_obs = obs.reshape((-1,) + envs.observation_space.shape)
+        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + envs.action_space.shape)
+        b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
@@ -421,16 +424,8 @@ if __name__ == "__main__":
         #   the system will return zeros
         interventions = torch.where(actions != 0, 1.0, 0.0)
 
-        # unflatten_obs = None
-        # for ob in obs:
-        #     processed = agent.unflatten_and_process(ob)
-        #     unflatten_obs = processed if unflatten_obs is None else torch.concat((unflatten_obs, processed))
-
-        datasets, data_loaders, data_name = load_data_new(args_citris, img_data=obs,
-                                                          interventions=interventions, env_name=args.env_id,
-                                                          seq_len=args_citris.seq_len)
-
         # Optimizing the policy and value network
+        b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
             print(f'UPDATE EPOCH {epoch}')
@@ -438,55 +433,22 @@ if __name__ == "__main__":
             citris_track_logs = {'kld': [], 'rec_loss_t1': [], 'intv_classifier_z': [], 'mi_estimator_model': [],
                                  'mi_estimator_z': [], 'mi_estimator_factor': [], 'reg_loss': []}
             citris_track_loss = []
-            for x in data_loaders['train']:
-                img_pairs = x[0]
-                targets = x[1]
-                mb_inds = np.array(x[2])
+            for start in range(0, args.batch_size, args.minibatch_size):
+                end = start + args.minibatch_size
+                mb_inds = b_inds[start:end]
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               action=b_actions[mb_inds],
                                                                               dropout_prob=args_citris.dropout_update)
 
-                old_approx_kl, approx_kl, pg_loss = agent.policy_loss(newlogprob, b_logprobs, mb_inds, args.clip_coef,
-                                                                      args.norm_adv, clipfracs, b_advantages)
-                # logratio = newlogprob - b_logprobs[mb_inds]
-                #
-                # # # TODO: Clip the logratio to a range of -0.02 and 0.02
-                # # logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.02))
-                # # logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.02))
-                #
-                # ratio = logratio.exp()
-                #
-                # with torch.no_grad():
-                #     # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                #     old_approx_kl = (-logratio).mean()
-                #     approx_kl = ((ratio - 1) - logratio).mean()
-                #     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
-                #
-                # mb_advantages = b_advantages[mb_inds]
-                # if args.norm_adv:
-                #     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-                #
-                # # Policy loss
-                # pg_loss1 = -mb_advantages * ratio
-                # pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                # pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                old_approx_kl, approx_kl, pg_loss = agent.policy_loss(newlogprob, b_logprobs, mb_inds,
+                                                                      args.clip_coef, args.norm_adv, clipfracs,
+                                                                      b_advantages)
 
-                # Value loss
-                # newvalue = newvalue.view(-1)
-                # if args.clip_vloss:
-                #     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                #     v_clipped = b_values[mb_inds] + torch.clamp(
-                #         newvalue - b_values[mb_inds],
-                #         -args.clip_coef,
-                #         args.clip_coef,
-                #     )
-                #     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                #     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                #     v_loss = 0.5 * v_loss_max.mean()
-                # else:
-                #     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-                v_loss = agent.value_loss(newvalue, b_returns, b_values, mb_inds, args.clip_coef, args.clip_vloss)
+                v_loss = agent.value_loss(newvalue, b_returns, b_values, mb_inds,
+                                          args.clip_coef, args.clip_vloss)
+
+                rec_loss, rec_obs = agent.rec_loss(obs[mb_inds], obs[mb_inds])
 
                 entropy_loss = entropy.mean()
                 # MYCODE
@@ -506,8 +468,8 @@ if __name__ == "__main__":
                 # To prevent an overflow of saved images
                 data_loader += 1
 
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-                agent.update_ppo(loss)
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
+                agent.update_ppo(loss, clip_norm_ac=args.max_grad_norm, clip_norm_dec=args.max_grad_norm)
                 # loss = citris_loss
                 # agent.causal_model.set_train(training=True)
                 # optimizer.zero_grad()
@@ -527,7 +489,7 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        # writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -535,11 +497,12 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        writer.add_scalar("losses/rec_loss", rec_loss, global_step)
 
         # CITRIS LOGGING
-        for key, value in citris_track_logs.items():
-            writer.add_scalar(f"icitris/{key}", mean(value), global_step)
-        writer.add_scalar("icitris/train_loss", mean(citris_track_loss), global_step)
+        # for key, value in citris_track_logs.items():
+        #     writer.add_scalar(f"icitris/{key}", mean(value), global_step)
+        # writer.add_scalar("icitris/train_loss", mean(citris_track_loss), global_step)
 
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)

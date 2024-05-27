@@ -32,14 +32,20 @@ class Actor(nn.Module):
             nn.Linear(hidden_dim, 2 * action_shape[0])
         )
 
+        # self.trunk = nn.Sequential(
+        #         nn.Linear(self.encoder.feature_dim, hidden_dim), nn.ReLU(),
+        #         nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        #         nn.Linear(hidden_dim, np.prod(action_shape))
+        #     )
+
         self.outputs = dict()
         self.apply(weight_init)
 
-    def forward(
-        self, obs, compute_pi=True, compute_log_pi=True, detach_encoder=False
-    ):
+    def forward(self, obs, compute_pi=True, compute_log_pi=True, detach_encoder=False):
         obs = self.encoder(obs, detach=detach_encoder)
-
+        # mu = self.trunk(obs)
+        # # TODO: Improve the performance of the actor network (tanh is from the squashing function)
+        # return torch.tanh(mu)
         mu, log_std = self.trunk(obs).chunk(2, dim=-1)
 
         # constrain log_std inside [log_std_min, log_std_max]
@@ -80,28 +86,26 @@ class Actor(nn.Module):
 
 class QFunction(nn.Module):
     """MLP for q-function."""
-    # TODO: Action is not always available in PPO, see if the system works without the action information here
-
     def __init__(self, obs_dim, action_dim=None, hidden_dim=1024):
         super().__init__()
 
-        # self.trunk = nn.Sequential(
-        #     nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
-        #     nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-        #     nn.Linear(hidden_dim, 1)
-        # )
-
         self.trunk = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
 
-    def forward(self, obs, action):
-        # assert obs.size(0) == action.size(0)
+        # self.trunk = nn.Sequential(
+        #     nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
+        #     nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        #     nn.Linear(hidden_dim, 1)
+        # )
 
-        # obs_action = torch.cat([obs, action], dim=1)
-        return self.trunk(obs)
+    def forward(self, obs, action):
+        assert obs.size(0) == action.size(0)
+
+        obs_action = torch.cat([obs, action], dim=1)
+        return self.trunk(obs_action)
 
 
 class Critic(nn.Module):
