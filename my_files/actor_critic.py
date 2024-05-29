@@ -28,25 +28,16 @@ class Actor(nn.Module):
 
         # TODO: More of the cleanrl type network
         self.trunk = nn.Sequential(
-            layer_init(nn.Linear(self.encoder.feature_dim, hidden_dim)), nn.ReLU(),
+            layer_init(nn.Linear(encoder_feature_dim, hidden_dim)), nn.ReLU(),
             layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
             layer_init(nn.Linear(hidden_dim, 2 * action_shape[0]), std=0.01),
         )
-
-        # self.trunk = nn.Sequential(
-        #         nn.Linear(self.encoder.feature_dim, hidden_dim), nn.ReLU(),
-        #         nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-        #         nn.Linear(hidden_dim, np.prod(action_shape))
-        #     )
 
         self.outputs = dict()
         self.apply(weight_init)
 
     def forward(self, obs, compute_pi=True, compute_log_pi=True, detach_encoder=False):
         obs = self.encoder(obs, detach=detach_encoder)
-        # mu = self.trunk(obs)
-        # # TODO: Improve the performance of the actor network (tanh is from the squashing function)
-        # return torch.tanh(mu)
         mu, log_std = self.trunk(obs).chunk(2, dim=-1)
 
         # constrain log_std inside [log_std_min, log_std_max]
@@ -62,7 +53,6 @@ class Actor(nn.Module):
             pi = mu + noise * std
         else:
             pi = None
-            entropy = None
 
         if compute_log_pi:
             log_pi = gaussian_logprob(noise, log_std)
@@ -96,12 +86,6 @@ class QFunction(nn.Module):
             layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
-        # self.trunk = nn.Sequential(
-        #     nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
-        #     nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-        #     nn.Linear(hidden_dim, 1)
-        # )
-
     def forward(self, obs, action):
         assert obs.size(0) == action.size(0)
 
@@ -122,7 +106,8 @@ class Critic(nn.Module):
             num_filters
         )
 
-        self.critic_net = QFunction(self.encoder.feature_dim, action_shape[0], hidden_dim)
+        self.Q1 = QFunction(encoder_feature_dim, action_shape[0], hidden_dim)
+        # self.Q2 = QFunction(self.encoder.feature_dim, action_shape[0], hidden_dim)
 
         self.outputs = dict()
         self.apply(weight_init)
@@ -130,8 +115,7 @@ class Critic(nn.Module):
     def forward(self, obs, action, detach_encoder=False):
         # detach_encoder allows to stop gradient propagation to encoder
         obs = self.encoder(obs, detach=detach_encoder)
-        value = self.critic_net(obs, action)
-
+        value = self.Q1(obs, action)
         return value
 
     def log(self, L, step, log_freq=LOG_FREQ):

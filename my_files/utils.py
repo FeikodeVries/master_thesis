@@ -597,6 +597,7 @@ def update_enco_params(self, *args, **kwargs):
 
 def preprocess_obs(obs, bits=5):
     """Preprocessing image, see https://arxiv.org/abs/1807.03039."""
+    # TODO: This preprocessing step actually makes the observations completely black
     bins = 2**bits
     assert obs.dtype == torch.float32
     if bits < 8:

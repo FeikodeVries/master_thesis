@@ -7,6 +7,10 @@ from torch.distributions.normal import Normal
 from my_files.encoder_decoder import make_encoder, make_decoder
 from my_files import utils, actor_critic
 
+# TODO:
+#   - Look into why the entropy always stays the same
+#   -
+
 
 class PPO_AE(object):
     def __init__(
@@ -64,12 +68,21 @@ class PPO_AE(object):
             encoder_feature_dim, num_layers, num_filters
         ).to(device)
 
+        # self.critic_target = actor_critic.Critic(
+        #     obs_shape, action_shape, hidden_dim, encoder_type,
+        #     encoder_feature_dim, num_layers, num_filters
+        # ).to(device)
+
+        # self.critic_target.load_state_dict(self.critic.state_dict())
+
         # tie encoders between actor and critic
-        self.actor.encoder.copy_conv_weights_from(self.critic.encoder)
+        # self.actor.encoder.copy_conv_weights_from(self.critic.encoder)
 
         # set target entropy to -|A|
         self.target_entropy = -np.prod(action_shape)
 
+        # TODO: Disable the separate encoders for now?
+        self.encoder = make_encoder(encoder_type, obs_shape, encoder_feature_dim, num_layers, num_filters).to(device)
         self.decoder = None
         if decoder_type != 'identity':
             # create decoder
@@ -79,10 +92,14 @@ class PPO_AE(object):
             ).to(device)
             self.decoder.apply(actor_critic.weight_init)
 
+            # TODO: integrate single encoder
             # optimizer for critic encoder for reconstruction loss
             self.encoder_optimizer = torch.optim.Adam(
-                self.critic.encoder.parameters(), lr=encoder_lr
+                self.encoder.parameters(), lr=encoder_lr
             )
+            # self.encoder_optimizer = torch.optim.Adam(
+            #     self.critic.encoder.parameters(), lr=encoder_lr
+            # )
 
             # optimizer for decoder
             self.decoder_optimizer = torch.optim.Adam(
@@ -101,55 +118,38 @@ class PPO_AE(object):
         )
 
         self.train()
+        # self.critic_target.train()
 
     def train(self, training=True):
         self.training = training
         self.actor.train(training)
         self.critic.train(training)
+        self.encoder.train(training)
         if self.decoder is not None:
             self.decoder.train(training)
 
     def get_value(self, obs, action, detach=False):
-        return self.critic(obs, action, detach_encoder=detach)
+        # TODO: Two Q-functions don't really seem to be a part of the PPO system (SAC part)
+        value = self.critic(obs, action, detach_encoder=detach)
+        return value
 
-    def get_action_and_value(self, x, action=None, dropout_prob=0.1):
+    def get_action_and_value(self, x, action=None, detach=False, dropout_prob=0.1):
         # TODO: actor output is probably causing issues with the PPO system
-        action_mean, _, _, _ = self.actor(x, compute_log_pi=False, detach_encoder=True)
+        obs = self.encoder(x, detach)
+        action_mean = self.actor(obs, detach_encoder=detach)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
-
         if action is None:
-            # detach = False
-            # action_mean, _, _, _ = self.actor(x, compute_log_pi=False)
-            # action_logstd = self.actor_logstd.expand_as(action_mean)
-            # action_std = torch.exp(action_logstd)
-            # probs = Normal(action_mean, action_std)
             action = probs.sample()
-        # else:
-        #     detach = True
-        #     action_mean, _, _, _ = self.actor(x, detach_encoder=True)
-        #     action_logstd = self.actor_logstd.expand_as(action_mean)
-        #     action_std = torch.exp(action_logstd)
-        #     probs = Normal(action_mean, action_std)
 
         return torch.flatten(action), probs.log_prob(action).sum(1), probs.entropy().sum(1), \
-               self.get_value(x, action, detach=True)
-        # action_mean = self.actor(x, compute_log_pi=False, detach_encoder=True)
-        # action_logstd = self.actor_logstd.expand_as(action_mean)
-        # action_std = torch.exp(action_logstd)
-        # probs = Normal(action_mean, action_std)
-        # if action is None:
-        #     action = probs.sample()
-        #     # action = utils.mask_actions(action, dropout_prob=dropout_prob)
-        #
-        # return torch.flatten(action), probs.log_prob(action).sum(1), probs.entropy().sum(1), \
-        #        self.get_value(x, action, detach=action is not None)
+               self.get_value(obs, action, detach=detach)
 
     def policy_loss(self, newlogprob, b_logprobs, mb_inds, clip_coef, norm_adv, clipfracs, b_advantages):
         logratio = newlogprob - b_logprobs[mb_inds]
 
-        # TODO: Clip logratio to range, the max. approx_kl becomes 0.3 * 0.1
+        # # TODO: Clip logratio to range, the max. approx_kl becomes ~ 0.3 * 0.1
         logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.3))
         logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.3))
 
@@ -186,11 +186,7 @@ class PPO_AE(object):
         return v_loss
 
     def rec_loss(self, obs, target_obs):
-        h = self.critic.encoder(obs)
-
-        # if target_obs.dim() == 4:
-            # preprocess images to be in [-0.5, 0.5] range
-        #    target_obs = utils.preprocess_obs(target_obs)
+        h = self.encoder(obs)
         rec_obs = self.decoder(h)
         rec_loss = F.mse_loss(target_obs, rec_obs)
 
@@ -198,9 +194,9 @@ class PPO_AE(object):
         # see https://arxiv.org/pdf/1903.12436.pdf
         latent_loss = (0.5 * h.pow(2).sum(1)).mean()
 
-        loss = rec_loss + self.decoder_latent_lambda * latent_loss
+        rec_loss = rec_loss + self.decoder_latent_lambda * latent_loss
 
-        return loss, rec_obs
+        return rec_loss, rec_obs, target_obs
 
     def update_ppo(self, loss, clip_norm_ac, clip_norm_dec):
         self.actor_optimizer.zero_grad()
@@ -210,9 +206,9 @@ class PPO_AE(object):
 
         loss.backward()
 
-        nn.utils.clip_grad_norm_(self.actor.parameters(), clip_norm_ac)
-        nn.utils.clip_grad_norm_(self.critic.parameters(), clip_norm_ac)
-        nn.utils.clip_grad_norm_(self.decoder.parameters(), clip_norm_dec)
+        # nn.utils.clip_grad_norm_(self.actor.parameters(), clip_norm_ac)
+        # nn.utils.clip_grad_norm_(self.critic.parameters(), clip_norm_ac)
+        # nn.utils.clip_grad_norm_(self.decoder.parameters(), clip_norm_dec)
 
         self.actor_optimizer.step()
         self.critic_optimizer.step()
