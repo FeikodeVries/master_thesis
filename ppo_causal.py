@@ -72,7 +72,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 16  # TODO: Default(32) Could be that the running average from BatchNorm
+    num_minibatches: int = 32  # TODO: Default(32) Could be that the running average from BatchNorm
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -90,6 +90,15 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+
+    # MY ARGS
+    action_repeat: int = 0
+    """for how many frames to hold an action, 0 is not action repeat"""
+    framestack: int = 3
+    """How many frames to stack in a rolling manner"""
+    action_dropout: float = 0.1
+    """how often to intervene on a """
+    save_img: bool = False
 
     # to be filled in runtime
     batch_size: int = 0
@@ -115,10 +124,10 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
-        # TODO: Stack the frames in a rolling manner
+        # Stack the frames in a rolling manner
         env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
         env = mywrapper.ResizeObservation(env, shape=IMG_SIZE)
-        env = mywrapper.FrameStack(env, k=args_citris.framestack)
+        env = mywrapper.FrameStack(env, k=args.framestack)
         env = gym.wrappers.ClipAction(env)
 
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
@@ -138,75 +147,69 @@ class Agent(nn.Module):
     """
     Combines the PPO agent with the citris implementation to allow for the gradients to flow through the value function
     """
+    # TODO: Fix my system --> potential issues:
+    #  - setting agent.train() --> not done in PPO?
+    #  - having too many hidden dims?
+    #  - Clipping approx_kl?
+    #  - Not shuffling before optimising?
+
     def __init__(self, envs):
         super().__init__()
-        self.actor = actor_critic.Actor(
-            envs.single_observation_space.shape, envs.single_action_space.shape,
-            1024, 'pixel', 50, -10, 2, 4, 32).to(device)
+        # self.critic = nn.Sequential(
+        #     layer_init(nn.Linear(50, 1024)), nn.ReLU(),
+        #     layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
+        #     layer_init(nn.Linear(1024, 1), std=1.0),
+        # )
+        #
+        # self.actor = nn.Sequential(
+        #     layer_init(nn.Linear(50, 1024)), nn.ReLU(),
+        #     layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
+        #     layer_init(nn.Linear(1024, np.prod(envs.single_action_space.shape)), std=0.01),
+        # )
 
-        self.critic = actor_critic.Critic(
-            envs.single_observation_space.shape, envs.single_action_space.shape, 1024, 'pixel', 50, 4, 32).to(device)
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(50, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, 1), std=1.0),
+        )
+
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(50, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+        )
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
 
+        self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
+                                    feature_dim=50, num_layers=4, num_filters=32).to(device)
         self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
                                     feature_dim=50, num_layers=4, num_filters=32).to(device)
 
+        self.encoder.apply(actor_critic.weight_init)
         self.decoder.apply(actor_critic.weight_init)
         self.decoder_latent_lambda = 1e-6
 
-        agent_params = [param for name, param in self.named_parameters() if name.startswith('actor_logstd')]
-        critic_params = [param for name, param in self.critic.named_parameters() if name.startswith('Q')]
-
-        # optimizers
-        # self.optimizer = torch.optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
-        # self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=args.learning_rate, betas=(0.9, 0.999))
-        # self.critic_optimizer = torch.optim.Adam(critic_params, lr=args.learning_rate, betas=(0.9, 0.999))
-        # self.encoder_optimizer = torch.optim.Adam(self.critic.encoder.parameters(), lr=1e-3)
-        # self.decoder_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=1e-3, weight_decay=1e-6)
-
-        # self.causal_model = iCITRIS(c_hid=args_citris.c_hid, width=IMG_SIZE, num_latents=args_citris.num_latents,
-        #                             obs_shape=envs.observation_space.shape, c_in=3 if args_citris.rgb else 1,
-        #                             num_causal_vars=args_citris.num_causal_vars,
-        #                             run_name=run_name, lambda_sparse=args_citris.lambda_sparse,
-        #                             act_fn=args_citris.act_fn, beta_classifier=args_citris.beta_classifier,
-        #                             beta_mi_estimator=args_citris.beta_mi_estimator, beta_t1=args_citris.beta_t1,
-        #                             autoregressive_prior=args_citris.autoregressive_prior,
-        #                             action_shape=envs.action_space.shape)
-
-        self.train()
+        # self.train()
 
     def train(self, training=True):
         self.actor.train(training)
         self.critic.train(training)
         self.decoder.train(training)
+        self.encoder.train(training)
 
-    def update(self, loss):
-        # TODO: In SAC+AE these are not all updated every step, some are updated every other step
-        #   Optimise: Only add the needed parameters per optimiser --> Total return shot in this version, but
-        #   Decoder is a lot better
-        self.actor_optimizer.zero_grad()
-        self.critic_optimizer.zero_grad()
-        self.encoder_optimizer.zero_grad()
-        self.decoder_optimizer.zero_grad()
-        self.optimizer.zero_grad()
+    # def get_value(self, x, action, detach=False):
+    #     # Allow the gradient to flow through the critic
+    #     return self.critic(x)
+    #     # return self.critic(x, action, detach)
 
-        loss.backward()
-        nn.utils.clip_grad_norm_(self.parameters(), args.max_grad_norm)
-
-        self.actor_optimizer.step()
-        self.critic_optimizer.step()
-        self.encoder_optimizer.step()
-        self.decoder_optimizer.step()
-        self.optimizer.step()
-
-    def get_value(self, x, action, detach=False):
-        return self.critic(x, action, detach)
+    def get_value(self, x):
+        return self.critic(x)
 
     def get_action_and_value(self, x, action=None, detach=False, dropout_prob=0.1):
         # Prevent the gradient from flowing through the policy
-        # TODO: Make the process the same as in SAC+AE
-        action_mean, _, _, _ = self.actor(x)
+        latent = self.encoder(x)
+        action_mean = self.actor(latent.detach())
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -215,10 +218,10 @@ class Agent(nn.Module):
             # TODO: Should dropout be done in the policy rollout or update? --> I believe in the rollout
             # action = utils.mask_actions(action, dropout_prob=dropout_prob)
 
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(x, action, detach)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(latent)
 
     def rec_loss(self, obs, target_obs):
-        h = self.critic.encoder(obs)
+        h = self.encoder(obs)
         rec_obs = self.decoder(h)
         rec_loss = F.mse_loss(target_obs, rec_obs)
 
@@ -253,50 +256,6 @@ if __name__ == "__main__":
             save_code=True,
         )
 
-    # MYCODE
-    parser = utils.get_default_parser()
-    parser.add_argument('--model', type=str, default='active_iCITRISVAE')
-    parser.add_argument('--c_hid', type=int, default=32)                # TODO: Optimise hyperparam --> Default: 32
-    parser.add_argument('--pretraining_size', type=float, default=0)
-    parser.add_argument('--dropout_pretraining', type=float, default=0.7)
-    parser.add_argument('--dropout_update', type=float, default=0.01)    # TODO: Optimise hyperparam (default: .1)
-    parser.add_argument('--decoder_num_blocks', type=int, default=1)    # TODO: Optimise hyperparam
-    parser.add_argument('--act_fn', type=str, default='silu')
-    parser.add_argument('--num_latents', type=int, default=50)          # TODO: Optimise hyperparam --> Default: 32
-    parser.add_argument('--classifier_lr', type=float, default=4e-3)
-    parser.add_argument('--classifier_momentum', type=float, default=0.0)
-    parser.add_argument('--classifier_gumbel_temperature', type=float, default=1.0)
-    parser.add_argument('--classifier_use_normalization', action='store_true')
-    parser.add_argument('--classifier_use_conditional_targets', action='store_true')
-    parser.add_argument('--kld_warmup', type=int, default=0)
-    parser.add_argument('--beta_t1', type=float, default=1.0)
-    parser.add_argument('--gamma', type=float, default=1.0)
-    parser.add_argument('--lambda_reg', type=float, default=0.0)
-    parser.add_argument('--autoregressive_prior', action='store_true')
-    parser.add_argument('--beta_classifier', type=float, default=4.0)
-    parser.add_argument('--beta_mi_estimator', type=float, default=0.0)
-    parser.add_argument('--lambda_sparse', type=float, default=0.02)
-    parser.add_argument('--mi_estimator_comparisons', type=int, default=1)
-    parser.add_argument('--graph_learning_method', type=str, default="ENCO")
-    parser.add_argument('--graph_lr', type=float, default=5e-4)
-
-    parser.add_argument('--num_causal_vars', type=int, default=6)
-    parser.add_argument('--resume_training', type=bool, default=False)
-    parser.add_argument('--rgb', type=bool, default=True)
-    parser.add_argument('--action_repeat', type=int, default=2)
-    parser.add_argument('--framestack', type=int, default=3)
-    parser.add_argument('--max_iters', type=int, default=100000)
-
-    datahandler = dh.DataHandling()
-
-    args_citris = parser.parse_args()
-    model_args = vars(args_citris)
-    args.num_pretraining = args_citris.pretraining_size // args.batch_size
-    CAUSAL_OBSERVATION = spaces.Box(shape=(args_citris.num_latents, args_citris.num_causal_vars),
-                                    low=-float("inf"), high=float("inf"), dtype=np.float32)
-
-    # END MYCODE
-
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -305,14 +264,17 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # envs = make_env(args.env_id, args.capture_video, run_name, args.gamma)
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
     )
     agent = Agent(envs).to(device)
-    # agent = PPO_AE(obs_shape=envs.single_observation_space.shape, action_shape=envs.single_action_space.shape,
-    #                device='cuda', hidden_dim=64, init_temperature=0.1, critic_tau=0.01, encoder_tau=0.05,
-    #                decoder_latent_lambda=1e-6, decoder_weight_lambda=1e-7)
+
+    agent_params = [param for name, param in agent.named_parameters() if name.startswith('actor') or name.startswith('critic')]
+
+    optimizer = optim.Adam([{'params': agent.encoder.parameters(), 'lr': 1e-3},  # Encoder params
+                            {'params': agent.decoder.parameters(), 'lr': 1e-3, 'weight_decay': 1e-6},  # Decoder params
+                            {'params': agent_params, 'eps': 1e-5}],
+                           lr=args.learning_rate)
 
     if args.load_model:
         path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/ppo_continuous_action.cleanrl_model'
@@ -323,12 +285,12 @@ if __name__ == "__main__":
             print("Pretrained RL model not found")
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps,) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps,) + envs.single_action_space.shape).to(device)
-    logprobs = torch.zeros((args.num_steps,)).to(device)
-    rewards = torch.zeros((args.num_steps,)).to(device)
-    dones = torch.zeros((args.num_steps,)).to(device)
-    values = torch.zeros((args.num_steps,)).to(device)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -343,28 +305,6 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
-    # # Get the different params from the causal model
-    # citris_graph_params, citris_counter_params, citris_other_params = agent.causal_model.get_params()
-    # # Remove the causal model params from the PPO agent
-    agent_params = [param for name, param in agent.named_parameters() if name.startswith('actor_logstd')]
-    critic_params = [param for name, param in agent.critic.named_parameters() if name.startswith('Q')]
-
-    # TODO: Potentially use AdamW --> optimise the values of the learning rate scheduler
-    #   Also test some lower learning rates for the systems
-    optimizer = optim.Adam([{'params': agent.critic.encoder.parameters(), 'lr': 1e-4},  # Encoder params
-                            {'params': agent.decoder.parameters(), 'lr': 1e-4, 'weight_decay': 1e-6},   # Decoder params
-                            {'params': agent.actor.parameters(), 'lr': args.learning_rate, 'betas': (0.9, 0.999)},
-                            {'params': critic_params, 'lr': args.learning_rate, 'betas': (0.9, 0.999)},
-                            {'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5}],
-                           lr=args.learning_rate, weight_decay=0.0)
-
-    
-    # TODO: Test out the effect of the scheduler
-    # scheduler = utils.CosineWarmupScheduler(optimizer,
-    #                                         warmup=[200 * args_citris.warmup, 2 * args_citris.warmup,
-    #                                                  2 * args_citris.warmup],
-    #                                         offset=[10000, 0, 0],
-    #                                         max_iters=args_citris.max_iters)
     # RESET THE ENVIRONMENT
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -376,28 +316,34 @@ if __name__ == "__main__":
     # RL TRAINING
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
-        # if args.anneal_lr:
-        #     frac = 1.0 - (iteration - 1.0) / args.num_iterations
-        #     lrnow = frac * args.learning_rate
-        #     # optimizer.param_groups[0]["lr"] = lrnow
+        if args.anneal_lr:
+            frac = 1.0 - (iteration - 1.0) / args.num_iterations
+            lrnow = frac * args.learning_rate
+            optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+
             # ALGO LOGIC: action logic
             with torch.no_grad():
                 # TODO: Do action repeat, only do a new action every so often so the results of a
                 #   certain action can be clearer to the system
-                if (step % args_citris.action_repeat) == 0:
-                    action, logprob, _, value = agent.get_action_and_value(x=next_obs,
-                                                                           dropout_prob=args_citris.dropout_update)
-                    values[step] = value.flatten()
+                if args.action_repeat != 0:
+                    if (step % args.action_repeat) == 0:
+                        action, logprob, _, value = agent.get_action_and_value(x=next_obs,
+                                                                               dropout_prob=args.action_dropout)
+                        values[step] = value.flatten()
+                    else:
+                        action = actions[step - 1]
+                        logprob = logprobs[step - 1]
+                        value = values[step-1]
+                        values[step] = value
                 else:
-                    action = actions[step - 1]
-                    logprob = logprobs[step - 1]
-                    value = values[step-1]
-                    values[step] = value
+                    action, logprob, _, value = agent.get_action_and_value(x=next_obs,
+                                                                           dropout_prob=args.action_dropout)
+                    values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
@@ -414,13 +360,11 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
-        agent.train(training=False)
+        # agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
             # TODO: This allows for integrating the action into the critic network
-            next_action, _, _, next_value = agent.get_action_and_value(next_obs)
-            next_value = next_value.reshape(1, -1)
-            # next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_value = agent.get_value(agent.encoder(next_obs)).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -435,7 +379,7 @@ if __name__ == "__main__":
             returns = advantages + values
 
         # flatten the batch
-        # b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
+        b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
         b_advantages = advantages.reshape(-1)
@@ -445,25 +389,20 @@ if __name__ == "__main__":
         # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
         # TODO: These might need to be the other way around as the 0 values are the intervened ones --> if all zeros,
         #   the system will return zeros
-        interventions = torch.where(actions != 0, 1.0, 0.0)
+        # interventions = torch.where(actions != 0, 1.0, 0.0)
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         for epoch in range(args.update_epochs):
-            print(f'UPDATE EPOCH {epoch}')
-            data_loader = 0
-            citris_track_logs = {'kld': [], 'rec_loss_t1': [], 'intv_classifier_z': [], 'mi_estimator_model': [],
-                                 'mi_estimator_z': [], 'mi_estimator_factor': [], 'reg_loss': []}
-            citris_track_loss = []
+            np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=obs[mb_inds],
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
                                                                               action=b_actions[mb_inds],
-                                                                              detach=True,
-                                                                              dropout_prob=args_citris.dropout_update)
+                                                                              dropout_prob=args.action_dropout)
                 # old_approx_kl, approx_kl, pg_loss = agent.policy_loss(newlogprob, b_logprobs, mb_inds,
                 #                                                       args.clip_coef, args.norm_adv, clipfracs,
                 #                                                       b_advantages)
@@ -473,8 +412,9 @@ if __name__ == "__main__":
 
                 logratio = newlogprob - b_logprobs[mb_inds]
 
-                logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.3))
-                logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.3))
+                # TODO: Train state rep learning with this system
+                # logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.3))
+                # logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.3))
 
                 ratio = logratio.exp()
 
@@ -510,44 +450,40 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
 
-                rec_loss, rec_obs, target_obs = agent.rec_loss(obs[mb_inds], obs[mb_inds])
+                rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
 
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
 
-                if epoch == 0 and start == 0:
-                    # Save image of an original + reconstruction every policy rollout
-                    path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+                if args.save_img:
+                    if epoch == 0 and start == 0:
+                        # Save image of an original + reconstruction every policy rollout
+                        path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
 
-                    original_imgs = torch.split(target_obs[0], 3)
-                    original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
-                    rec_imgs = torch.split(rec_obs[0], 3)
+                        original_imgs = torch.split(target_obs[0], 3)
+                        original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
+                        rec_imgs = torch.split(rec_obs[0], 3)
 
-                    rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
+                        rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
 
-                    cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
-                                                                                       cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
-                                                                                       cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255 * original_imgs[2],
-                                                                                       cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[0],
-                                                                                       cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[1],
-                                                                                       cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
-                                                                                       cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255 * original_imgs[2],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[0],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[1],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
+                                                                                           cv2.COLOR_RGB2BGR))
 
-                agent.train(True)
-                # agent.update(loss)
+                # agent.train(True)
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-                # agent.update_ppo(loss, clip_norm_ac=args.max_grad_norm, clip_norm_dec=args.max_grad_norm)
-
-            # TODO: This should be correct for the scheduler
-            # scheduler.step()
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
@@ -556,7 +492,7 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        # writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -588,5 +524,12 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
-    #  TODO: Current setup: regular LR, actionrepeat, combined_loss, main_optim (all under same system)
+    #  TODO: Current setup: default PPO, framestack, action_repeat==2, no set_train, no logclipping
+
+    # TODO: Different setups to test:
+    #  - actor-critic networks with more hidden_dims
+    #       - adding the action to the critic network
+    #  - learning annealing disabled
+    #  - larger batch_size
+    #  - setting agent.train()
 
