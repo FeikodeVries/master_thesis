@@ -92,14 +92,14 @@ class ResizeObservationandFrameSkip(gym.ObservationWrapper, gym.utils.RecordCons
 
         return self.observation(obs), info
 
-    def step(self, action):
-        reward = 0
-        for _ in range(self._frame_skip):
-            obs, r, done, truncated, info = self.env.step(action)
-            reward += r
-            if done or truncated:
-                break
-        return self.observation(obs), reward, done, truncated, info
+    # def step(self, action):
+    #     reward = 0
+    #     for _ in range(self._frame_skip):
+    #         obs, r, done, truncated, info = self.env.step(action)
+    #         reward += r
+    #         if done or truncated:
+    #             break
+    #     return self.observation(obs), reward, done, truncated, info
 
 
 class FrameStack(gym.Wrapper):

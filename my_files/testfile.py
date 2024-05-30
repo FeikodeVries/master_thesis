@@ -21,10 +21,8 @@ from collections import defaultdict
 # print(d)
 from torch.distributions.normal import Normal
 
-probs = Normal(-1, 1)
-action = torch.tensor([0, 0, 0, 0, 0, 0])
-probs.log_prob(action).sum(1)
-for i in range(3):
+
+for i in range(1):
     print(i)
 
 # OLD CODE: ACTOR CRITIC WITH OWN ENCODERS

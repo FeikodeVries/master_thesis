@@ -98,7 +98,7 @@ class Args:
     """How many frames to stack in a rolling manner"""
     action_dropout: float = 0.1
     """how often to intervene on the actions to be able to disentangle the latent space"""
-    save_img: bool = True
+    save_img: bool = False
     """whether to save reconstructions of the images"""
     hidden_dims: int = 64
     """how many hidden dimensions for the actor-critic networks"""
@@ -110,6 +110,8 @@ class Args:
     """how large the latent representation should be"""
     action_in_critic: bool = False
     """whether to add the action to the critic"""
+    set_train: bool = True
+    """whether to do model.train()"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -186,7 +188,8 @@ class Agent(nn.Module):
         self.decoder.apply(actor_critic.weight_init)
         self.decoder_latent_lambda = 1e-6
 
-        self.train()
+        if args.set_train:
+            self.train()
 
     def train(self, training=True):
         self.actor.train(training)
@@ -318,7 +321,8 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
-            agent.train(training=True)
+            if args.set_train:
+                agent.train(training=True)
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
@@ -327,8 +331,17 @@ if __name__ == "__main__":
             actions[step] = action
             logprobs[step] = logprob
 
+            # TODO: Do action repeat
+            reward = 0
+            for i in range(args.action_repeat):
+                print(i)
+                next_obs, r, terminations, truncations, infos = envs.step(action.cpu().numpy())
+                reward += r
+                if terminations or truncations:
+                    break
+
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            # next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
             next_done = np.array(bool(np.logical_or(terminations, truncations)))
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
@@ -341,13 +354,15 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
         # AGENT EVAL
-        agent.train(training=False)
+        if args.set_train:
+            agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
             # TODO: This allows for integrating the action into the critic network
             _, _, _, next_value = agent.get_action_and_value(x=next_obs)
             next_value = next_value.reshape(1, -1)
             # next_value = agent.get_value(agent.encoder(next_obs)).reshape(1, -1)
+            # TODO: This perhaps resulted in better return
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
