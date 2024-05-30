@@ -92,13 +92,24 @@ class Args:
     """the target KL divergence threshold"""
 
     # MY ARGS
-    action_repeat: int = 0
-    """for how many frames to hold an action, 0 is not action repeat"""
+    action_repeat: int = 1
+    """for how many frames to hold an action, 1 the default, regular action"""
     framestack: int = 3
     """How many frames to stack in a rolling manner"""
     action_dropout: float = 0.1
-    """how often to intervene on a """
-    save_img: bool = False
+    """how often to intervene on the actions to be able to disentangle the latent space"""
+    save_img: bool = True
+    """whether to save reconstructions of the images"""
+    hidden_dims: int = 64
+    """how many hidden dimensions for the actor-critic networks"""
+    activation_function = 'relu'
+    """activation function to use for the actor-critic system"""
+    img_size: int = 84
+    """image size of the images used to train the PPO agent"""
+    latent_dims: int = 50
+    """how large the latent representation should be"""
+    action_in_critic: bool = False
+    """whether to add the action to the critic"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -107,11 +118,6 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-
-LOG_FREQ = 10000
-IMG_SIZE = 84
-# TODO: IMG_Size has to have a whole number as output when calculating x**n = IMG_SIZE / n
-#  Otherwise there are issues with decoder resizing, other possible image sizes are: 64: n=4, 96: n=6
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma):
@@ -126,10 +132,10 @@ def make_env(env_id, idx, capture_video, run_name, gamma):
 
         # Stack the frames in a rolling manner
         env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
-        env = mywrapper.ResizeObservation(env, shape=IMG_SIZE)
+        env = mywrapper.ResizeObservationandFrameSkip(env, shape=args.img_size, frame_skip=args.action_repeat)
         env = mywrapper.FrameStack(env, k=args.framestack)
-        env = gym.wrappers.ClipAction(env)
 
+        env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
@@ -147,50 +153,40 @@ class Agent(nn.Module):
     """
     Combines the PPO agent with the citris implementation to allow for the gradients to flow through the value function
     """
-    # TODO: Fix my system --> potential issues:
-    #  - setting agent.train() --> not done in PPO?
-    #  - having too many hidden dims?
-    #  - Clipping approx_kl?
-    #  - Not shuffling before optimising?
-
     def __init__(self, envs):
         super().__init__()
-        # self.critic = nn.Sequential(
-        #     layer_init(nn.Linear(50, 1024)), nn.ReLU(),
-        #     layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
-        #     layer_init(nn.Linear(1024, 1), std=1.0),
-        # )
-        #
-        # self.actor = nn.Sequential(
-        #     layer_init(nn.Linear(50, 1024)), nn.ReLU(),
-        #     layer_init(nn.Linear(1024, 1024)), nn.ReLU(),
-        #     layer_init(nn.Linear(1024, np.prod(envs.single_action_space.shape)), std=0.01),
-        # )
+        if args.activation_function == 'tanh':
+            act_fn = nn.Tanh()
+        elif args.activation_function == 'relu':
+            act_fn = nn.ReLU()
+        else:
+            act_fn = nn.SiLU()
+        additional_critic_init = np.prod(envs.single_action_space.shape) if args.action_in_critic else 0
 
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(50, 64)), nn.Tanh(),
-            layer_init(nn.Linear(64, 64)), nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(args.latent_dims + additional_critic_init, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(args.hidden_dims, 1), std=1.0),
         )
 
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(50, 64)), nn.Tanh(),
-            layer_init(nn.Linear(64, 64)), nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(args.latent_dims, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(args.hidden_dims, np.prod(envs.single_action_space.shape)), std=0.01),
         )
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
 
         self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
-                                    feature_dim=50, num_layers=4, num_filters=32).to(device)
+                                    feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
         self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
-                                    feature_dim=50, num_layers=4, num_filters=32).to(device)
+                                    feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
 
         self.encoder.apply(actor_critic.weight_init)
         self.decoder.apply(actor_critic.weight_init)
         self.decoder_latent_lambda = 1e-6
 
-        # self.train()
+        self.train()
 
     def train(self, training=True):
         self.actor.train(training)
@@ -198,15 +194,11 @@ class Agent(nn.Module):
         self.decoder.train(training)
         self.encoder.train(training)
 
-    # def get_value(self, x, action, detach=False):
-    #     # Allow the gradient to flow through the critic
-    #     return self.critic(x)
-    #     # return self.critic(x, action, detach)
+    def get_value(self, obs, action):
+        input = torch.cat([obs, action], dim=1) if args.action_in_critic else obs
+        return self.critic(input)
 
-    def get_value(self, x):
-        return self.critic(x)
-
-    def get_action_and_value(self, x, action=None, detach=False, dropout_prob=0.1):
+    def get_action_and_value(self, x, action=None):
         # Prevent the gradient from flowing through the policy
         latent = self.encoder(x)
         action_mean = self.actor(latent.detach())
@@ -216,9 +208,9 @@ class Agent(nn.Module):
         if action is None:
             action = probs.sample()
             # TODO: Should dropout be done in the policy rollout or update? --> I believe in the rollout
-            # action = utils.mask_actions(action, dropout_prob=dropout_prob)
+            # action = utils.mask_actions(action, dropout_prob=args.dropout_prob)
 
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(latent)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(latent, action)
 
     def rec_loss(self, obs, target_obs):
         h = self.encoder(obs)
@@ -326,24 +318,12 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
+            agent.train(training=True)
+
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                # TODO: Do action repeat, only do a new action every so often so the results of a
-                #   certain action can be clearer to the system
-                if args.action_repeat != 0:
-                    if (step % args.action_repeat) == 0:
-                        action, logprob, _, value = agent.get_action_and_value(x=next_obs,
-                                                                               dropout_prob=args.action_dropout)
-                        values[step] = value.flatten()
-                    else:
-                        action = actions[step - 1]
-                        logprob = logprobs[step - 1]
-                        value = values[step-1]
-                        values[step] = value
-                else:
-                    action, logprob, _, value = agent.get_action_and_value(x=next_obs,
-                                                                           dropout_prob=args.action_dropout)
-                    values[step] = value.flatten()
+                action, logprob, _, value = agent.get_action_and_value(x=next_obs)
+                values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
 
@@ -360,11 +340,14 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
-        # agent.train(training=False)
+        # AGENT EVAL
+        agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
             # TODO: This allows for integrating the action into the critic network
-            next_value = agent.get_value(agent.encoder(next_obs)).reshape(1, -1)
+            _, _, _, next_value = agent.get_action_and_value(x=next_obs)
+            next_value = next_value.reshape(1, -1)
+            # next_value = agent.get_value(agent.encoder(next_obs)).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -386,11 +369,6 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        # OBTAIN THE INTERVENTIONS FROM THE ACTION VALUES
-        # TODO: These might need to be the other way around as the 0 values are the intervened ones --> if all zeros,
-        #   the system will return zeros
-        # interventions = torch.where(actions != 0, 1.0, 0.0)
-
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
@@ -401,21 +379,9 @@ if __name__ == "__main__":
                 mb_inds = b_inds[start:end]
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
-                                                                              action=b_actions[mb_inds],
-                                                                              dropout_prob=args.action_dropout)
-                # old_approx_kl, approx_kl, pg_loss = agent.policy_loss(newlogprob, b_logprobs, mb_inds,
-                #                                                       args.clip_coef, args.norm_adv, clipfracs,
-                #                                                       b_advantages)
-                #
-                # v_loss = agent.value_loss(newvalue, b_returns, b_values, mb_inds,
-                #                           args.clip_coef, args.clip_vloss)
+                                                                              action=b_actions[mb_inds])
 
                 logratio = newlogprob - b_logprobs[mb_inds]
-
-                # TODO: Train state rep learning with this system
-                # logratio = torch.min(logratio, logratio.new_full(logratio.size(), 0.3))
-                # logratio = torch.max(logratio, logratio.new_full(logratio.size(), -0.3))
-
                 ratio = logratio.exp()
 
                 with torch.no_grad():
@@ -478,7 +444,6 @@ if __name__ == "__main__":
                         cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
                                                                                            cv2.COLOR_RGB2BGR))
 
-                # agent.train(True)
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
@@ -502,18 +467,12 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar("losses/rec_loss", rec_loss, global_step)
 
-        # CITRIS LOGGING
-        # for key, value in citris_track_logs.items():
-        #     writer.add_scalar(f"icitris/{key}", mean(value), global_step)
-        # writer.add_scalar("icitris/train_loss", mean(citris_track_loss), global_step)
-
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
         # profiler.disable()
         # stats = pstats.Stats(profiler).sort_stats('tottime')
         # stats.print_stats()
-        # test = 0
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
@@ -527,9 +486,12 @@ if __name__ == "__main__":
     #  TODO: Current setup: default PPO, framestack, action_repeat==2, no set_train, no logclipping
 
     # TODO: Different setups to test:
-    #  - actor-critic networks with more hidden_dims
-    #       - adding the action to the critic network
-    #  - learning annealing disabled
-    #  - larger batch_size
-    #  - setting agent.train()
+    #  - hidden dims 1064, 512, 256, 128, 64
+    #  - actions in critic: yes, no
+    #  - learning annealing enabled, disabled
+    #  - action repeat 1, 2, 3, 4
+    #  - batch size 64, 128
+    #  - activation function: relu, tanh, silu
+    #  - latent dims: 50, 64, 96
+    #  - ent_coef: 0, 0.001, 0.01, 0.1
 
