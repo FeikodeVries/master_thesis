@@ -1,12 +1,8 @@
 """Wrapper for augmenting observations by pixel values."""
-import collections
-import copy
-from collections.abc import MutableMapping
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import cv2
 from collections import deque
 from gymnasium.error import DependencyNotInstalled
 import torch
@@ -91,15 +87,6 @@ class ResizeObservationandFrameSkip(gym.ObservationWrapper, gym.utils.RecordCons
         obs, info = self.env.reset(seed=seed, options=options)
 
         return self.observation(obs), info
-
-    # def step(self, action):
-    #     reward = 0
-    #     for _ in range(self._frame_skip):
-    #         obs, r, done, truncated, info = self.env.step(action)
-    #         reward += r
-    #         if done or truncated:
-    #             break
-    #     return self.observation(obs), reward, done, truncated, info
 
 
 class FrameStack(gym.Wrapper):

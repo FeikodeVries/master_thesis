@@ -3,30 +3,22 @@ import os
 import random
 import time
 from dataclasses import dataclass
-import cProfile, pstats
+# import cProfile, pstats
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
-import matplotlib.pyplot as plt
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
-from gymnasium import spaces
-from statistics import mean
 import torch.nn.functional as F
-import cv2
-from my_files.datahandling import load_data_new
-import my_files.datahandling as dh
-from my_files.new_active_icitris import iCITRIS
+# import cv2
 from my_files import custom_env_wrappers as mywrapper
 from my_files.encoder_decoder import make_encoder, make_decoder
-import my_files.utils as utils
 import my_files.actor_critic as actor_critic
-from gymnasium.wrappers import PixelObservationWrapper, ResizeObservation, FrameStack
-from my_files.PPO_AE import PPO_AE
+from my_files.utils import InstantaneousPrior
 
 @dataclass
 class Args:
@@ -102,7 +94,7 @@ class Args:
     """whether to save reconstructions of the images"""
     hidden_dims: int = 64
     """how many hidden dimensions for the actor-critic networks"""
-    activation_function = 'relu'
+    activation_function = 'tanh'
     """activation function to use for the actor-critic system"""
     img_size: int = 84
     """image size of the images used to train the PPO agent"""
@@ -110,8 +102,33 @@ class Args:
     """how large the latent representation should be"""
     action_in_critic: bool = False
     """whether to add the action to the critic"""
-    set_train: bool = True
+    set_train: bool = False
     """whether to do model.train()"""
+    is_vae: bool = False
+    """whether to use a VAE or an AE"""
+    beta: float = 1.0
+    """the coefficient for the kld on the VAE loss"""
+    experiment_name: str = 'test_default_PPO+AE'
+
+    """
+    Default PPO+AE:
+    AE:
+    - action_repeat = 1
+    - framestack = 3
+    - hidden_dims = 64
+    - act_fn = tanh
+    - latent_dims = 50
+    - action + critic = False
+    - set_train = False
+    - img_size = 84
+    - ent_coef = 0
+    - beta = 1.0
+    PPO:
+    - lr = 3e-4
+    - num_minibatches = 32
+    - num_steps = 2048
+    - anneal_lr = True
+    """
 
     # to be filled in runtime
     batch_size: int = 0
@@ -180,7 +197,8 @@ class Agent(nn.Module):
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
 
         self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
-                                    feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
+                                    feature_dim=args.latent_dims, num_layers=4, num_filters=32,
+                                    variational=args.is_vae).to(device)
         self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
                                     feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
 
@@ -201,9 +219,20 @@ class Agent(nn.Module):
         input = torch.cat([obs, action], dim=1) if args.action_in_critic else obs
         return self.critic(input)
 
+    def encode_imgs(self, obs):
+        if args.is_vae:
+            z_mean, z_logstd = self.encoder(obs)
+            latent = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
+
+            kld = torch.mean(-0.5 * torch.sum(1 + z_logstd - z_mean ** 2 - z_logstd.exp(), dim=1), dim=0)
+            return kld, latent
+        else:
+            latent = self.encoder(obs)
+            return _, latent
+
     def get_action_and_value(self, x, action=None):
         # Prevent the gradient from flowing through the policy
-        latent = self.encoder(x)
+        _, latent = self.encode_imgs(x)
         action_mean = self.actor(latent.detach())
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
@@ -216,16 +245,16 @@ class Agent(nn.Module):
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(latent, action)
 
     def rec_loss(self, obs, target_obs):
-        h = self.encoder(obs)
-        rec_obs = self.decoder(h)
+        kld, latent = self.encode_imgs(obs)
+        rec_obs = self.decoder(latent)
         rec_loss = F.mse_loss(target_obs, rec_obs)
 
         # add L2 penalty on latent representation
         # see https://arxiv.org/pdf/1903.12436.pdf
-        latent_loss = (0.5 * h.pow(2).sum(1)).mean()
-
+        latent_loss = (0.5 * latent.pow(2).sum(1)).mean()
         rec_loss = rec_loss + self.decoder_latent_lambda * latent_loss
-
+        if args.is_vae:
+            rec_loss = kld * args.beta + rec_loss
         return rec_loss, rec_obs, target_obs
 
 
@@ -236,7 +265,7 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}"
+    run_name = f"{args.env_id}__{args.experiment_name}__{args.seed}"
 
     if args.track:
         import wandb
@@ -268,8 +297,7 @@ if __name__ == "__main__":
 
     optimizer = optim.Adam([{'params': agent.encoder.parameters(), 'lr': 1e-3},  # Encoder params
                             {'params': agent.decoder.parameters(), 'lr': 1e-3, 'weight_decay': 1e-6},  # Decoder params
-                            {'params': agent_params, 'eps': 1e-5}],
-                           lr=args.learning_rate)
+                            {'params': agent_params, 'eps': 1e-5}], lr=args.learning_rate)
 
     if args.load_model:
         path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/ppo_continuous_action.cleanrl_model'
@@ -331,17 +359,16 @@ if __name__ == "__main__":
             actions[step] = action
             logprobs[step] = logprob
 
-            # TODO: Do action repeat
-            reward = 0
-            for i in range(args.action_repeat):
-                print(i)
-                next_obs, r, terminations, truncations, infos = envs.step(action.cpu().numpy())
-                reward += r
-                if terminations or truncations:
-                    break
+            # # TODO: Do action repeat --> might be causing problems still
+            # reward = 0
+            # for i in range(args.action_repeat):
+            #     next_obs, r, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            #     reward += r
+            #     if terminations or truncations:
+            #         break
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            # next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
             next_done = np.array(bool(np.logical_or(terminations, truncations)))
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
@@ -435,29 +462,29 @@ if __name__ == "__main__":
 
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
 
-                if args.save_img:
-                    if epoch == 0 and start == 0:
-                        # Save image of an original + reconstruction every policy rollout
-                        path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
-
-                        original_imgs = torch.split(target_obs[0], 3)
-                        original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
-                        rec_imgs = torch.split(rec_obs[0], 3)
-
-                        rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
-
-                        cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255 * original_imgs[2],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[0],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[1],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
-                                                                                           cv2.COLOR_RGB2BGR))
+                # if args.save_img:
+                #     if epoch == 0 and start == 0:
+                #         # Save image of an original + reconstruction every policy rollout
+                #         path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+                #
+                #         original_imgs = torch.split(target_obs[0], 3)
+                #         original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
+                #         rec_imgs = torch.split(rec_obs[0], 3)
+                #
+                #         rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
+                #
+                #         cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255 * original_imgs[2],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[0],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[1],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
+                #                                                                            cv2.COLOR_RGB2BGR))
 
                 optimizer.zero_grad()
                 loss.backward()

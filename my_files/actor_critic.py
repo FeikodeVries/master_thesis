@@ -2,8 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
-import math
 
 from my_files.encoder_decoder import make_encoder, make_decoder
 

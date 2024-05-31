@@ -213,7 +213,7 @@ class iCITRIS(nn.Module):
         rec_loss = F.mse_loss(x_rec, labels[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
         # Combine to full loss
         # TODO: Train without the prior loss
-        # loss = (kld * self.beta_t1 + rec_loss).mean()
+        loss = (kld * self.beta_t1 + rec_loss).mean()
         loss = rec_loss.mean()
         # Target classifier
         loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
