@@ -4,22 +4,23 @@ import os
 import random
 import time
 from dataclasses import dataclass
-# import cProfile, pstats
-import gymnasium as gym
+import cProfile, pstats
+# import gymnasium as gym
+import gym
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import tyro
+# import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
 import torch.nn.functional as F
-# import cv2
+import cv2
 from my_files import custom_env_wrappers as mywrapper
 from my_files.encoder_decoder import make_encoder, make_decoder
 import my_files.actor_critic as actor_critic
-
 
 def parser():
     parser = argparse.ArgumentParser()
@@ -89,7 +90,7 @@ def parser():
                         help="How many frames to stack in a rolling manner")
     parser.add_argument('--action_dropout', type=float, default=0.1,
                         help="how often to intervene on the actions to be able to disentangle the latent space")
-    parser.add_argument('--save_img', action='store_true',
+    parser.add_argument('--save_img', action='store_false',
                         help="whether to save reconstructions of the images")
     parser.add_argument('--hidden_dims', type=int, default=64,
                         help="how many hidden dimensions for the actor-critic networks")
@@ -113,6 +114,8 @@ def parser():
                         help="whether to use RPO")
     parser.add_argument('--rpo_alpha', type=float, default=0.5,
                         help="rpo alpha")
+    parser.add_argument('--reward_logging_freq', type=int, default=100,
+                        help="how often to plot the reward")
 
     # MAKE AT RUNTIME
     parser.add_argument('--experiment_name', type=str, default='default',
@@ -127,149 +130,30 @@ def parser():
     return parser.parse_args()
 
 
-@dataclass
-class Args:
-    exp_name: str = os.path.basename(__file__)[: -len(".py")]
-    """the name of this experiment"""
-    seed: int = 3
-    """seed of the experiment"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    track: bool = False
-    """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
-    """the wandb's project name"""
-    wandb_entity = None
-    """the entity (team) of wandb's project"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = True
-    """whether to save model into the `runs/{run_name}` folder"""
-    load_model: bool = False
-    """whether to load a model to continue training"""
-    upload_model: bool = False
-    """whether to upload the saved model to huggingface"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
-
-    # Algorithm specific arguments
-    env_id: str = "Walker2d-v4"
-    """the id of the environment"""
-    total_timesteps: int = 1000000
-    """total timesteps of the experiments"""
-    learning_rate: float = 3e-4  # TODO: Default is 3e-4
-    """the learning rate of the optimizer"""
-    num_envs: int = 1
-    """the number of parallel game environments"""
-    num_steps: int = 2048  # Divide 2048 by num_envs
-    """the number of steps to run in each environment per policy rollout"""
-    anneal_lr: bool = True
-    """Toggle learning rate annealing for policy and value networks"""
-    gamma: float = 0.99
-    """the discount factor gamma"""
-    gae_lambda: float = 0.95
-    """the lambda for the general advantage estimation"""
-    num_minibatches: int = 16
-    """the number of mini-batches"""
-    update_epochs: int = 10
-    """the K epochs to update the policy"""
-    norm_adv: bool = True
-    """Toggles advantages normalization"""
-    clip_coef: float = 0.2
-    """the surrogate clipping coefficient"""
-    clip_vloss: bool = True
-    """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0
-    """coefficient of the entropy"""
-    vf_coef: float = 0.5
-    """coefficient of the value function"""
-    max_grad_norm: float = 0.5
-    """the maximum norm for the gradient clipping"""
-    target_kl: float = 0.0
-    """the target KL divergence threshold"""
-
-    # MY ARGS
-    action_repeat: int = 1
-    """for how many frames to hold an action, 1 the default, regular action"""
-    framestack: int = 3
-    """How many frames to stack in a rolling manner"""
-    action_dropout: float = 0.1
-    """how often to intervene on the actions to be able to disentangle the latent space"""
-    save_img: bool = False
-    """whether to save reconstructions of the images"""
-    hidden_dims: int = 128
-    """how many hidden dimensions for the actor-critic networks"""
-    activation_function = 'relu'
-    """activation function to use for the actor-critic system"""
-    img_size: int = 84
-    """image size of the images used to train the PPO agent"""
-    latent_dims: int = 50
-    """how large the latent representation should be"""
-    action_in_critic: bool = False
-    """whether to add the action to the critic"""
-    set_train: bool = False
-    """whether to do model.train()"""
-    is_vae: bool = True
-    """whether to use a VAE or an AE"""
-    beta: float = 1e-8
-    """the coefficient for the kld on the VAE loss"""
-    encoder_lr: float = 1e-3
-    experiment_name: str = 'default'
-
-    """
-    Default PPO+AE:
-    AE:
-    - action_repeat = 1
-    - framestack = 3
-    - hidden_dims = 64
-    - act_fn = tanh
-    - latent_dims = 50
-    - action + critic = False
-    - set_train = False
-    - img_size = 84
-    - ent_coef = 0
-    - beta = 1.0
-    PPO:
-    - lr = 3e-4
-    - num_minibatches = 32
-    - num_steps = 2048
-    - anneal_lr = True
-    
-    IMPORTANT:
-    - When increasing the number of parallel environments, the amount of steps per rollout needs to be decreased,
-    otherwise there are far too many steps, and not enough rollouts, leading to slow learning
-    """
-
-    # to be filled in runtime
-    batch_size: int = 0
-    """the batch size (computed in runtime)"""
-    minibatch_size: int = 0
-    """the mini-batch size (computed in runtime)"""
-    num_iterations: int = 0
-    """the number of iterations (computed in runtime)"""
-
-
 def make_env(env_id, idx, capture_video, run_name, gamma):
     def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id, render_mode="rgb_array")
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-
-        # Stack the frames in a rolling manner
-        env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
-        env = mywrapper.ResizeObservation(env, shape=args.img_size)
+        env = gym.make('dmc:Walker-walk-v1', from_pixels=True, channels_first=True, frame_skip=2)
         env = mywrapper.FrameStack(env, k=args.framestack)
-
-        env = gym.wrappers.ClipAction(env)
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        env.seed(args.seed)
         return env
+
+        # if capture_video and idx == 0:
+        #     env = gym.make(env_id, render_mode="rgb_array")
+        #     env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        # else:
+        #     env = gym.make(env_id, render_mode="rgb_array")
+        # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+        # env = gym.wrappers.RecordEpisodeStatistics(env)
+        #
+        # # Stack the frames in a rolling manner
+        # env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
+        # env = mywrapper.ResizeObservation(env, shape=args.img_size)
+        # env = mywrapper.FrameStack(env, k=args.framestack)
+        #
+        # env = gym.wrappers.ClipAction(env)
+        # env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        # return env
 
     return thunk
 
@@ -379,15 +263,16 @@ class Agent(nn.Module):
 
 if __name__ == "__main__":
     args = parser()
+    # args = tyro.cli(Args)
     # profiler = cProfile.Profile()
     # profiler.enable()
-    # args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    args.experiment_name = f'repeat{args.action_repeat}_chid{args.hidden_dims}_activation{args.activation_function}_' \
-                           f'latent{args.latent_dims}_aIC{args.action_in_critic}_setTrain{args.set_train}_beta{args.beta}_' \
-                           f'batches{args.num_minibatches}_anneal{args.anneal_lr}_rpo{args.rpo}_seed{args.seed}'
+    # args.experiment_name = f'repeat{args.action_repeat}_chid{args.hidden_dims}_activation{args.activation_function}_' \
+    #                        f'latent{args.latent_dims}_aIC{args.action_in_critic}_setTrain{args.set_train}_beta{args.beta}_' \
+    #                        f'batches{args.num_minibatches}_anneal{args.anneal_lr}_rpo{args.rpo}_seed{args.seed}'
+    args.experiment_name = "default_dmc_test"
     run_name = f"{args.experiment_name}"
 
     if args.track:
@@ -440,7 +325,7 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
@@ -454,7 +339,7 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs = envs.reset()
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
@@ -480,30 +365,26 @@ if __name__ == "__main__":
             actions[step] = action
             logprobs[step] = logprob
 
-            # TODO: Do action repeat --> might be causing problems still
-            reward = 0
-            for i in range(args.action_repeat):
-                next_obs, r, terminations, truncations, infos = envs.step(action.cpu().numpy())
-                reward += r
-                if terminations or truncations:
-                    break
-
             # TRY NOT TO MODIFY: execute the game and log data.
-            # next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            next_done = np.logical_or(terminations, truncations)
+            next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
+            # next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            if "final_info" in infos:
-                for info in infos["final_info"]:
-                    if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+            if step % args.reward_logging_freq == 0:
+                print(f"global_step={global_step}, episodic_return={reward}")
+                writer.add_scalar("charts/episodic_return", reward, global_step)
+
+            # #if "final_info" in infos:
+            #     for info in infos["final_info"]:
+            #         if info and "episode" in info:
+            #             print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+            #             writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
+            #             writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
         # AGENT EVAL
-        # if args.set_train:
-        #     agent.train(training=False)
+        if args.set_train:
+            agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
             # TODO: This allows for integrating the action into the critic network
@@ -581,29 +462,29 @@ if __name__ == "__main__":
                 rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
 
-                # if args.save_img:
-                #     if epoch == 0 and start == 0:
-                #         # Save image of an original + reconstruction every policy rollout
-                #         path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
-                #
-                #         original_imgs = torch.split(target_obs[0], 3)
-                #         original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
-                #         rec_imgs = torch.split(rec_obs[0], 3)
-                #
-                #         rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
-                #
-                #         cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255 * original_imgs[2],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[0],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[1],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255 * rec_imgs[2],
-                #                                                                            cv2.COLOR_RGB2BGR))
+                if args.save_img:
+                    if epoch == 0 and start == 0:
+                        # Save image of an original + reconstruction every policy rollout
+                        path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+
+                        original_imgs = torch.split(target_obs[0], 3)
+                        original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
+                        rec_imgs = torch.split(rec_obs[0], 3)
+
+                        rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
+
+                        cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255*original_imgs[1],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[0],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[1],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[2],
+                                                                                           cv2.COLOR_RGB2BGR))
 
                 optimizer.zero_grad()
                 loss.backward()

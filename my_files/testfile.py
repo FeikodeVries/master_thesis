@@ -20,9 +20,8 @@ from collections import defaultdict
 #
 # print(d)
 from torch.distributions.normal import Normal
-
-for i in range(1):
-    print(i)
+from dm_control.suite import ALL_TASKS
+print(*ALL_TASKS, sep="\n")
 
 # OLD CODE: ACTOR CRITIC WITH OWN ENCODERS
 # self.actor = actor_critic.Actor(
