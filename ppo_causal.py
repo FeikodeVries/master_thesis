@@ -26,7 +26,7 @@ def parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__)[: -len(".py")],
                         help="""the name of this experiment""")
-    parser.add_argument('--seed', type=int, default=3,
+    parser.add_argument('--seed', type=int, default=0,
                         help="""seed of the experiment""")
     parser.add_argument('--torch_deterministic', type=bool, default=True,
                         help="""if toggled, `torch.backends.cudnn.deterministic=False`""")
@@ -56,15 +56,15 @@ def parser():
                         help="the learning rate of the optimizer")
     parser.add_argument('--num_envs', type=int, default=1,
                         help="the number of parallel game environments")
-    parser.add_argument('--num_steps', type=int, default=2048,
-                        help="the number of steps to run in each environment per policy rollout")
+    parser.add_argument('--num_steps', type=int, default=1000,
+                        help="the number of steps to run in each environment per policy rollout (Always 1000 for DMC)")
     parser.add_argument('--anneal_lr', action='store_false',
                         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument('--gamma', type=float, default=0.99,
                         help="the discount factor gamma")
     parser.add_argument('--gae_lambda', type=float, default=0.95,
                         help="the lambda for the general advantage estimation")
-    parser.add_argument('--num_minibatches', type=int, default=16,
+    parser.add_argument('--num_minibatches', type=int, default=32,
                         help="the number of mini-batches (Default is 32)")
     parser.add_argument('--update_epochs', type=int, default=10,
                         help="the K epochs to update the policy")
@@ -80,17 +80,19 @@ def parser():
                         help="coefficient of the value function")
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help="the maximum norm for the gradient clipping")
-    parser.add_argument('--target_kl', type=float, default=0.0,
+    parser.add_argument('--target_kl', type=float, default=0.01,
                         help="the target KL divergence threshold")
 
     # MY ARGUMENTS
+    parser.add_argument('--state_baseline', action='store_false',
+                        help="whether to train base PPO on states or on pixels")
     parser.add_argument('--action_repeat', type=int, default=1,
                         help="for how many frames to hold an action, 1 the default, regular action")
     parser.add_argument('--framestack', type=int, default=3,
                         help="How many frames to stack in a rolling manner")
     parser.add_argument('--action_dropout', type=float, default=0.1,
                         help="how often to intervene on the actions to be able to disentangle the latent space")
-    parser.add_argument('--save_img', action='store_false',
+    parser.add_argument('--save_img', action='store_true',
                         help="whether to save reconstructions of the images")
     parser.add_argument('--hidden_dims', type=int, default=64,
                         help="how many hidden dimensions for the actor-critic networks")
@@ -114,8 +116,6 @@ def parser():
                         help="whether to use RPO")
     parser.add_argument('--rpo_alpha', type=float, default=0.5,
                         help="rpo alpha")
-    parser.add_argument('--reward_logging_freq', type=int, default=100,
-                        help="how often to plot the reward")
 
     # MAKE AT RUNTIME
     parser.add_argument('--experiment_name', type=str, default='default',
@@ -130,30 +130,16 @@ def parser():
     return parser.parse_args()
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma):
+def make_env():
     def thunk():
-        env = gym.make('dmc:Walker-walk-v1', from_pixels=True, channels_first=True, frame_skip=2)
-        env = mywrapper.FrameStack(env, k=args.framestack)
+        if args.state_baseline:
+            env = gym.make('dmc:Cartpole-swingup-v1')
+            env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        else:
+            env = gym.make('dmc:Walker-run-v1', from_pixels=True, channels_first=True, frame_skip=2)
+            env = mywrapper.FrameStack(env, k=args.framestack)
         env.seed(args.seed)
         return env
-
-        # if capture_video and idx == 0:
-        #     env = gym.make(env_id, render_mode="rgb_array")
-        #     env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        # else:
-        #     env = gym.make(env_id, render_mode="rgb_array")
-        # env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        # env = gym.wrappers.RecordEpisodeStatistics(env)
-        #
-        # # Stack the frames in a rolling manner
-        # env = gym.wrappers.PixelObservationWrapper(env, pixels_only=True)
-        # env = mywrapper.ResizeObservation(env, shape=args.img_size)
-        # env = mywrapper.FrameStack(env, k=args.framestack)
-        #
-        # env = gym.wrappers.ClipAction(env)
-        # env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        # return env
 
     return thunk
 
@@ -177,31 +163,33 @@ class Agent(nn.Module):
         else:
             act_fn = nn.SiLU()
         additional_critic_init = np.prod(envs.single_action_space.shape) if args.action_in_critic else 0
+        input_dims = np.array(envs.single_observation_space.shape).prod() if args.state_baseline else args.latent_dims
 
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(args.latent_dims + additional_critic_init, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(input_dims + additional_critic_init, args.hidden_dims)), act_fn,
             layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
             layer_init(nn.Linear(args.hidden_dims, 1), std=1.0),
         )
 
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(args.latent_dims, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(input_dims, args.hidden_dims)), act_fn,
             layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
             layer_init(nn.Linear(args.hidden_dims, np.prod(envs.single_action_space.shape)), std=0.01),
         )
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
-        self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
-                                    feature_dim=args.latent_dims, num_layers=4, num_filters=32,
-                                    variational=args.is_vae).to(device)
+        if not args.state_baseline:
+            self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
+                                        feature_dim=args.latent_dims, num_layers=4, num_filters=32,
+                                        variational=args.is_vae).to(device)
 
-        self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
-                                    feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
+            self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
+                                        feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
 
-        self.encoder.apply(actor_critic.weight_init)
-        self.decoder.apply(actor_critic.weight_init)
-        self.decoder_latent_lambda = 1e-6
+            self.encoder.apply(actor_critic.weight_init)
+            self.decoder.apply(actor_critic.weight_init)
+            self.decoder_latent_lambda = 1e-6
 
         if args.set_train:
             self.train()
@@ -229,8 +217,13 @@ class Agent(nn.Module):
 
     def get_action_and_value(self, x, action=None):
         # Prevent the gradient from flowing through the policy
-        _, latent = self.encode_imgs(x)
-        action_mean = self.actor(latent.detach())
+        if args.state_baseline:
+            # Streamline the rest of the code
+            latent = x
+            action_mean = self.actor(latent)
+        else:
+            _, latent = self.encode_imgs(x)
+            action_mean = self.actor(latent.detach())
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -272,8 +265,12 @@ if __name__ == "__main__":
     # args.experiment_name = f'repeat{args.action_repeat}_chid{args.hidden_dims}_activation{args.activation_function}_' \
     #                        f'latent{args.latent_dims}_aIC{args.action_in_critic}_setTrain{args.set_train}_beta{args.beta}_' \
     #                        f'batches{args.num_minibatches}_anneal{args.anneal_lr}_rpo{args.rpo}_seed{args.seed}'
-    args.experiment_name = "default_dmc_test"
+    args.experiment_name = "dmc_test_cartpole_swingup_klclip"
     run_name = f"{args.experiment_name}"
+    if args.state_baseline:
+        args.set_train = False
+        args.anneal_lr = False
+        args.save_img = False
 
     if args.track:
         import wandb
@@ -296,15 +293,16 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
-    )
+    envs = gym.vector.SyncVectorEnv([make_env() for i in range(args.num_envs)])
     agent = Agent(envs).to(device)
 
     agent_params = [param for name, param in agent.named_parameters() if name.startswith('actor') or name.startswith('critic')]
-    optimizer = optim.Adam([{'params': agent.encoder.parameters(), 'lr': args.encoder_lr},  # Encoder params
-                            {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
-                            {'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5}], lr=args.learning_rate)
+    if args.state_baseline:
+        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    else:
+        optimizer = optim.Adam([{'params': agent.encoder.parameters(), 'lr': args.encoder_lr},  # Encoder params
+                                {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
+                                {'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5}], lr=args.learning_rate)
 
     if args.load_model:
         path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/ppo_continuous_action.cleanrl_model'
@@ -321,6 +319,7 @@ if __name__ == "__main__":
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    gae = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -353,6 +352,7 @@ if __name__ == "__main__":
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        total_reward = 0
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
@@ -367,20 +367,12 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
-            # next_done = np.logical_or(terminations, truncations)
+            total_reward += reward
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            if step % args.reward_logging_freq == 0:
-                print(f"global_step={global_step}, episodic_return={reward}")
-                writer.add_scalar("charts/episodic_return", reward, global_step)
-
-            # #if "final_info" in infos:
-            #     for info in infos["final_info"]:
-            #         if info and "episode" in info:
-            #             print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-            #             writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-            #             writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+        print(f"global_step={global_step}, episodic_return={total_reward}")
+        writer.add_scalar("charts/episodic_return", total_reward, global_step)
 
         # AGENT EVAL
         if args.set_train:
@@ -390,7 +382,6 @@ if __name__ == "__main__":
             # TODO: This allows for integrating the action into the critic network
             _, _, _, next_value = agent.get_action_and_value(x=next_obs)
             next_value = next_value.reshape(1, -1)
-            # next_value = agent.get_value(agent.encoder(next_obs)).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -459,8 +450,11 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
 
-                rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
+                if args.state_baseline:
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                else:
+                    rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
 
                 if args.save_img:
                     if epoch == 0 and start == 0:
@@ -507,7 +501,8 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        writer.add_scalar("losses/rec_loss", rec_loss, global_step)
+        if not args.state_baseline:
+            writer.add_scalar("losses/rec_loss", rec_loss, global_step)
 
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)

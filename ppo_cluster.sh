@@ -34,9 +34,9 @@ act_fn=${act_fns[SLURM_ARRAY_TASK_ID]}
 
 # Simple trick to create a unique directory for each run of the script
 echo $$
-mkdir o`echo $$`_nol2_$latent
-cd o`echo $$`_nol2_$latent
+mkdir o`echo $$`_seed$
+cd o`echo $$`_nol2_seed$
 
 # Run the actual experiment.
-MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --latent_dims $latent
+MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $latent
 
