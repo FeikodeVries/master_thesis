@@ -8,7 +8,7 @@ from gymnasium.error import DependencyNotInstalled
 import torch
 
 
-class ResizeObservationandFrameSkip(gym.ObservationWrapper, gym.utils.RecordConstructorArgs):
+class ResizeObservation(gym.ObservationWrapper, gym.utils.RecordConstructorArgs):
     """Resize the image observation.
 
     This wrapper works on environments with image observations. More generally,
@@ -29,7 +29,7 @@ class ResizeObservationandFrameSkip(gym.ObservationWrapper, gym.utils.RecordCons
         (64, 64, 3)
     """
 
-    def __init__(self, env: gym.Env, shape: tuple[int, int] | int, frame_skip) -> None:
+    def __init__(self, env: gym.Env, shape: tuple[int, int] | int) -> None:
         """Resizes image observations to shape given by :attr:`shape`.
 
         Args:
@@ -45,9 +45,6 @@ class ResizeObservationandFrameSkip(gym.ObservationWrapper, gym.utils.RecordCons
             f"Expected shape to be a 2-tuple of positive integers, got: {shape}"
 
         self.shape = tuple(shape)
-
-        assert frame_skip > 0, f"Expected the total action frames to be at least 1, got: {frame_skip}"
-        self._frame_skip = frame_skip
 
         assert isinstance(env.observation_space['pixels'], spaces.Box), f"Expected the observation space to be Box, " \
                                                                   f"actual type: {type(env.observation_space['pixels'])}"

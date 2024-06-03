@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 def tie_weights(src, trg):
     assert type(src) == type(trg)
     trg.weight = src.weight
@@ -171,7 +172,7 @@ _AVAILABLE_ENCODERS = {'pixel': PixelEncoder, 'identity': IdentityEncoder}
 _AVAILABLE_DECODERS = {'pixel': PixelDecoder}
 
 
-def make_encoder(encoder_type, obs_shape, feature_dim, num_layers, num_filters, variational):
+def make_encoder(encoder_type, obs_shape, feature_dim, num_layers, num_filters, variational=False):
     assert encoder_type in _AVAILABLE_ENCODERS
 
     return _AVAILABLE_ENCODERS[encoder_type](obs_shape, feature_dim, num_layers, num_filters, variational)

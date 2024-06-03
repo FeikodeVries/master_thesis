@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=ppo_test
-#SBATCH --time=00:10:00
+#SBATCH --job-name=ppo_vae
+#SBATCH --time=12:00:00
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=defq
@@ -25,11 +25,18 @@ conda activate
 # mkdir $HOME/experiments
 cd $HOME/experiments
 
+hidden_dims=(64 128 256 512 1024)
+latent_space=(25 64 84 96 128 256 512)
+act_fns=('relu', 'tanh', 'silu')
+latent=${latent_space[SLURM_ARRAY_TASK_ID]}
+c_hid=${hidden_dims[SLURM_ARRAY_TASK_ID]}
+act_fn=${act_fns[SLURM_ARRAY_TASK_ID]}
+
 # Simple trick to create a unique directory for each run of the script
 echo $$
-mkdir o`echo $$`
-cd o`echo $$`
+mkdir o`echo $$`_nol2_$latent
+cd o`echo $$`_nol2_$latent
 
 # Run the actual experiment.
-python /home/fvs660/cleanrl/cleanrl/ppo_causal.py --total_timesteps 4048
+MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --latent_dims $latent
 

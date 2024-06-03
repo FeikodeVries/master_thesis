@@ -28,7 +28,7 @@ class Actor(nn.Module):
         self.trunk = nn.Sequential(
             layer_init(nn.Linear(encoder_feature_dim, hidden_dim)), nn.ReLU(),
             layer_init(nn.Linear(hidden_dim, hidden_dim)), nn.ReLU(),
-            layer_init(nn.Linear(hidden_dim, 2 * action_shape[0]), std=0.01),
+            layer_init(nn.Linear(hidden_dim, 2*action_shape[0]), std=0.01),
         )
 
         self.outputs = dict()
