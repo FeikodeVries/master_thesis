@@ -2,7 +2,6 @@ import pathlib
 import os
 import numpy as np
 import torch
-import pytorch_lightning as pl
 
 import torch.utils.data as data
 from cleanrl.my_files.datasets import ReacherDataset, WalkerDataset, PendulumDataset, CheetahDataset
@@ -84,33 +83,36 @@ class DataHandling:
 def load_data_new(args, img_data, interventions, env_name, seq_len=3):
     print('Loading data...')
     env_name = env_name.split('-')[0]
+    DataClass = WalkerDataset
+    dataset_args = {}
+    test_args = lambda train_set: {'causal_vars': train_set.target_names}
     # Extend for different models
-    if env_name == 'Reacher':
-        DataClass = ReacherDataset
-        dataset_args = {}
-        test_args = lambda train_set: {'causal_vars': train_set.target_names}
-    elif env_name == 'Walker2d':
-        DataClass = WalkerDataset
-        dataset_args = {}
-        test_args = lambda train_set: {'causal_vars': train_set.target_names}
-    elif env_name == 'InvertedPendulum':
-        # TODO: Sizes of tensors not matching?
-        DataClass = PendulumDataset
-        dataset_args = {}
-        test_args = lambda train_set: {'causal_vars': train_set.target_names}
-    elif env_name == 'HalfCheetah':
-        # TODO: far less often doing print statements for performance??
-        DataClass = CheetahDataset
-        dataset_args = {}
-        test_args = lambda train_set: {'causal_vars': train_set.target_names}
-    else:
-        pass
+    # if env_name == 'Reacher':
+    #     DataClass = ReacherDataset
+    #     dataset_args = {}
+    #     test_args = lambda train_set: {'causal_vars': train_set.target_names}
+    # elif env_name == 'Walker2d':
+    #     DataClass = WalkerDataset
+    #     dataset_args = {}
+    #     test_args = lambda train_set: {'causal_vars': train_set.target_names}
+    # elif env_name == 'InvertedPendulum':
+    #     # TODO: Sizes of tensors not matching?
+    #     DataClass = PendulumDataset
+    #     dataset_args = {}
+    #     test_args = lambda train_set: {'causal_vars': train_set.target_names}
+    # elif env_name == 'HalfCheetah':
+    #     # TODO: far less often doing print statements for performance??
+    #     DataClass = CheetahDataset
+    #     dataset_args = {}
+    #     test_args = lambda train_set: {'causal_vars': train_set.target_names}
+    # else:
+    #     pass
     folder = str(pathlib.Path(__file__).parent.resolve()) + '/data/'
 
     train_data = DataClass(data_folder=folder, img_data=img_data, interventions=interventions,
                            split='train', single_image=False, seq_len=seq_len, **dataset_args)
     # TODO: pin_memory and num_workers had to be disabled to allow for the use of dataloaders strangely
-    train_loader = data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False,
+    train_loader = data.DataLoader(train_data, batch_size=args.minibatch_size, shuffle=True,
                                    pin_memory=False, drop_last=True, num_workers=0)
 
     datasets = {

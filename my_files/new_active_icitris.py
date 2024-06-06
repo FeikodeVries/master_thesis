@@ -163,18 +163,6 @@ class iCITRIS(nn.Module):
         self.all_v_dicts = []
         self.prior_t1 = self.prior
 
-    def encode(self, x, random=True):
-        # Map input to encoding, e.g. for correlation metrics
-        z_mean, z_logstd = self.encoder(x)
-        if random:
-            z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
-        else:
-            z_sample = z_mean
-        return z_mean, z_sample, z_logstd
-
-    def decode(self, z_sample):
-        return self.decoder(z_sample)
-
     def get_loss(self, batch, target, global_step, epoch, data_loader):
         """ Main training method for calculating the loss """
         imgs = batch.cuda()

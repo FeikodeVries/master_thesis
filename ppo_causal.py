@@ -1,32 +1,37 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import argparse
 import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import random
 import time
-from dataclasses import dataclass
 import cProfile, pstats
-# import gymnasium as gym
-import gym
+import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# import tyro
+from shimmy.registration import DM_CONTROL_SUITE_ENVS
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 import pathlib
 import torch.nn.functional as F
 import cv2
+from collections import defaultdict
+
 from my_files import custom_env_wrappers as mywrapper
 from my_files.encoder_decoder import make_encoder, make_decoder
-import my_files.actor_critic as actor_critic
+from my_files import utils
+from my_files import causal_disentanglement as causal
+from my_files.datahandling import load_data_new
+
 
 def parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__)[: -len(".py")],
                         help="""the name of this experiment""")
-    parser.add_argument('--seed', type=int, default=0,
+    parser.add_argument('--seed', type=int, default=1,
                         help="""seed of the experiment""")
     parser.add_argument('--torch_deterministic', type=bool, default=True,
                         help="""if toggled, `torch.backends.cudnn.deterministic=False`""")
@@ -34,9 +39,9 @@ def parser():
                         help="""if toggled, cuda will be enabled by default""")
     parser.add_argument('--track', type=bool, default=False,
                         help="""if toggled, this experiment will be tracked with Weights and Biases""")
-    parser.add_argument('--wandb_project', type=str, default=None,
+    parser.add_argument('--wandb_project', type=str, default='',
                         help="the wandb's project name")
-    parser.add_argument('--wandb_entity', type=str, default=None,
+    parser.add_argument('--wandb_entity', type=str, default='',
                         help="the entity (team) of wandb's project")
     parser.add_argument('--capture_video', action='store_true',
                         help="whether to capture videos of the agent performances (check out `videos` folder)")
@@ -48,7 +53,7 @@ def parser():
                         help="whether to upload the saved model to huggingface")
     parser.add_argument('--hf_entity', type=str, default="",
                         help="the user or org name of the model repository from the Hugging Face Hub")
-    parser.add_argument('--env_id', type=str, default="Walker2d-v4",
+    parser.add_argument('--env_id', type=str, default="dm_control/walker-walk-v0",
                         help="the id of the environment")
     parser.add_argument('--total_timesteps', type=int, default=1000000,
                         help="total timesteps of the experiments")
@@ -56,7 +61,7 @@ def parser():
                         help="the learning rate of the optimizer")
     parser.add_argument('--num_envs', type=int, default=1,
                         help="the number of parallel game environments")
-    parser.add_argument('--num_steps', type=int, default=1000,
+    parser.add_argument('--num_steps', type=int, default=1024,
                         help="the number of steps to run in each environment per policy rollout (Always 1000 for DMC)")
     parser.add_argument('--anneal_lr', action='store_false',
                         help="Toggle learning rate annealing for policy and value networks")
@@ -80,19 +85,17 @@ def parser():
                         help="coefficient of the value function")
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help="the maximum norm for the gradient clipping")
-    parser.add_argument('--target_kl', type=float, default=0.01,
+    parser.add_argument('--target_kl', type=float, default=0.0,
                         help="the target KL divergence threshold")
 
-    # MY ARGUMENTS
-    parser.add_argument('--state_baseline', action='store_false',
+    # MY ARGUMENTS (Base system)
+    parser.add_argument('--state_baseline', action='store_true',
                         help="whether to train base PPO on states or on pixels")
-    parser.add_argument('--action_repeat', type=int, default=1,
+    parser.add_argument('--action_repeat', type=int, default=2,
                         help="for how many frames to hold an action, 1 the default, regular action")
-    parser.add_argument('--framestack', type=int, default=3,
+    parser.add_argument('--framestack', type=int, default=1,
                         help="How many frames to stack in a rolling manner")
-    parser.add_argument('--action_dropout', type=float, default=0.1,
-                        help="how often to intervene on the actions to be able to disentangle the latent space")
-    parser.add_argument('--save_img', action='store_true',
+    parser.add_argument('--save_img', action='store_false',
                         help="whether to save reconstructions of the images")
     parser.add_argument('--hidden_dims', type=int, default=64,
                         help="how many hidden dimensions for the actor-critic networks")
@@ -106,9 +109,9 @@ def parser():
                         help="whether to add the action to the critic")
     parser.add_argument('--set_train', action='store_true',
                         help="whether to do model.train()")
-    parser.add_argument('--is_vae', action='store_false',
+    parser.add_argument('--is_vae', action='store_true',
                         help="whether to use a VAE or an AE")
-    parser.add_argument('--beta', type=float, default=1e-8,
+    parser.add_argument('--beta', type=float, default=1.0,
                         help="the coefficient for the kld on the VAE loss")
     parser.add_argument('--encoder_lr', type=float, default=1e-3,
                         help="learning rate for the encoder")
@@ -116,6 +119,26 @@ def parser():
                         help="whether to use RPO")
     parser.add_argument('--rpo_alpha', type=float, default=0.5,
                         help="rpo alpha")
+
+    # MY ARGUMENTS (Causal)
+    parser.add_argument('--causal', action='store_false',
+                        help="whether to use the causal vae to train PPO")
+    parser.add_argument('--lambda_sparse', type=float, default=0.02,
+                        help="regularizer for encouraging sparse graphs")
+    parser.add_argument('--num_graph_samples', type=int, default=8,
+                        help='number of graph samples to use in ENCO gradient estimation')
+    parser.add_argument('--autoregressive_prior', action='store_true',
+                        help='whether the prior per causal variable is autoregressive')
+    parser.add_argument('--action_dropout', type=float, default=0.1,
+                        help="how often to intervene on the actions to be able to disentangle the latent space")
+    parser.add_argument('--log_std_min', type=int, default=-10,
+                        help='')
+    parser.add_argument('--log_std_max', type=int, default=2,
+                        help='')
+    parser.add_argument('--beta_classifier', type=float, default=2.0,
+                        help='')
+    parser.add_argument('--beta_mi_estimator', type=float, default=2.0,
+                        help='')
 
     # MAKE AT RUNTIME
     parser.add_argument('--experiment_name', type=str, default='default',
@@ -130,15 +153,31 @@ def parser():
     return parser.parse_args()
 
 
-def make_env():
+def make_env(env_id):
     def thunk():
         if args.state_baseline:
-            env = gym.make('dmc:Cartpole-swingup-v1')
-            env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+            env = gym.make(env_id)
+            env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+            env = gym.wrappers.RecordEpisodeStatistics(env)
+            env = gym.wrappers.ClipAction(env)
+            env = gym.wrappers.NormalizeObservation(env)
+            env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), env.observation_space)
+            env = gym.wrappers.NormalizeReward(env, gamma=args.gamma)
+            env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         else:
-            env = gym.make('dmc:Walker-run-v1', from_pixels=True, channels_first=True, frame_skip=2)
+            env = gym.make(env_id, render_mode="rgb_array", render_kwargs={'camera_id': 0})
+            env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+            env = gym.wrappers.RecordEpisodeStatistics(env)
+
+            # Stack the frames in a rolling manner
+            env = gym.wrappers.AddRenderObservation(env, render_only=True)
+            env = mywrapper.ResizeObservation(env, shape=args.img_size)
+            env = mywrapper.FrameSkip(env, frameskip=args.action_repeat)
             env = mywrapper.FrameStack(env, k=args.framestack)
-        env.seed(args.seed)
+
+            env = gym.wrappers.ClipAction(env)
+            env = gym.wrappers.NormalizeReward(env, gamma=args.gamma)
+            env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         return env
 
     return thunk
@@ -148,6 +187,35 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+
+def weight_init(m):
+    """Custom weight init for Conv2D and Linear layers."""
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
+        assert m.weight.size(2) == m.weight.size(3)
+        m.weight.data.fill_(0.0)
+        m.bias.data.fill_(0.0)
+        mid = m.weight.size(2) // 2
+        gain = nn.init.calculate_gain('relu')
+        nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
+
+
+def make_framestack(imgs, interventions, seq_len):
+    stacked_imgs = []
+    for idx in range(len(imgs)):
+        returns = []
+
+        img_pair = imgs[idx:idx + seq_len]
+        target = interventions[idx:idx + seq_len - 1]
+        returns += [target]
+        returns = [img_pair] + returns + [idx]
+        stacked_imgs.append(returns)
+
+    return stacked_imgs
 
 
 class Agent(nn.Module):
@@ -162,11 +230,12 @@ class Agent(nn.Module):
             act_fn = nn.ReLU()
         else:
             act_fn = nn.SiLU()
-        additional_critic_init = np.prod(envs.single_action_space.shape) if args.action_in_critic else 0
+
         input_dims = np.array(envs.single_observation_space.shape).prod() if args.state_baseline else args.latent_dims
+        input_dims = input_dims if not args.causal else (args.latent_dims * np.prod(envs.single_action_space.shape))
 
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(input_dims + additional_critic_init, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(input_dims, args.hidden_dims)), act_fn,
             layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
             layer_init(nn.Linear(args.hidden_dims, 1), std=1.0),
         )
@@ -185,11 +254,53 @@ class Agent(nn.Module):
                                         variational=args.is_vae).to(device)
 
             self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
-                                        feature_dim=args.latent_dims, num_layers=4, num_filters=32).to(device)
+                                        action_size=np.prod(envs.single_action_space.shape),
+                                        feature_dim=args.latent_dims, num_layers=4, num_filters=32,
+                                        causal=args.causal).to(device)
 
-            self.encoder.apply(actor_critic.weight_init)
-            self.decoder.apply(actor_critic.weight_init)
+            self.encoder.apply(weight_init)
+            self.decoder.apply(weight_init)
             self.decoder_latent_lambda = 1e-6
+
+        if args.causal:
+            self.prior = utils.InstantaneousPrior(num_latents=args.latent_dims,
+                                                  c_hid=args.hidden_dims,
+                                                  num_blocks=np.prod(envs.single_action_space.shape),
+                                                  framestack=args.framestack,
+                                                  shared_inputs=args.latent_dims,
+                                                  num_graph_samples=args.num_graph_samples,
+                                                  lambda_sparse=args.lambda_sparse,
+                                                  graph_learning_method="ENCO",
+                                                  autoregressive=args.autoregressive_prior)
+
+            self.intv_classifier = causal.InstantaneousTargetClassifier(
+                num_latents=args.latent_dims,
+                num_blocks=np.prod(envs.single_action_space.shape),
+                c_hid=args.hidden_dims * 2,
+                num_layers=1,
+                act_fn=nn.SiLU,
+                momentum_model=0.9,
+                gumbel_temperature=1.0,
+                use_normalization=True,
+                use_conditional_targets=True
+            )
+        self.mi_estimator = causal.MIEstimator(num_latents=args.latent_dims,
+                                               num_blocks=np.prod(envs.single_action_space.shape),
+                                               c_hid=args.hidden_dims,
+                                               momentum_model=0.9,
+                                               gumbel_temperature=1.0)
+        self.mi_scheduler = utils.SineWarmupScheduler(warmup=50000,
+                                                      start_factor=0.004,
+                                                      end_factor=1.0,
+                                                      offset=20000)
+        self.matrix_exp_scheduler = utils.SineWarmupScheduler(warmup=100000,
+                                                              start_factor=-6,
+                                                              end_factor=4,
+                                                              offset=10000)
+        self.causal_encoder = None
+        self.all_val_dists = defaultdict(list)
+        self.all_v_dicts = []
+        self.prior_t1 = self.prior
 
         if args.set_train:
             self.train()
@@ -200,9 +311,8 @@ class Agent(nn.Module):
         self.decoder.train(training)
         self.encoder.train(training)
 
-    def get_value(self, obs, action):
-        input = torch.cat([obs, action], dim=1) if args.action_in_critic else obs
-        return self.critic(input)
+    def get_val(self, obs):
+        return self.critic(obs)
 
     def encode_imgs(self, obs):
         if args.is_vae:
@@ -221,6 +331,9 @@ class Agent(nn.Module):
             # Streamline the rest of the code
             latent = x
             action_mean = self.actor(latent)
+        elif args.causal:
+            latent = self.causal_rep(x)
+            action_mean = self.actor(latent.detach())
         else:
             _, latent = self.encode_imgs(x)
             action_mean = self.actor(latent.detach())
@@ -229,18 +342,22 @@ class Agent(nn.Module):
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-            # TODO: Should dropout be done in the policy rollout or update? --> I believe in the rollout
-            # action = utils.mask_actions(action, dropout_prob=args.dropout_prob)
+            action = utils.mask_actions(action, dropout_prob=args.action_dropout)
         else:
             if args.rpo:
                 # sample again to add stochasticity, for the policy update
                 z = torch.FloatTensor(action_mean.shape).uniform_(-args.rpo_alpha, args.rpo_alpha).to(device)
                 action_mean = action_mean + z
                 probs = Normal(action_mean, action_std)
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_value(latent, action)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_val(latent)
 
     def rec_loss(self, obs, target_obs):
         kld, latent = self.encode_imgs(obs)
+
+        if target_obs.dim() == 4:
+            # preprocess images to be in [-0.5, 0.5] range
+            target_obs = utils.preprocess_obs(target_obs*255.)
+
         rec_obs = self.decoder(latent)
         rec_loss = F.mse_loss(target_obs, rec_obs)
         if args.is_vae:
@@ -253,6 +370,69 @@ class Agent(nn.Module):
             rec_loss = rec_loss + self.decoder_latent_lambda * latent_loss
         return rec_loss, rec_obs, target_obs
 
+    def causal_rep(self, obs):
+        z_mean, z_logstd = self.encoder(obs)
+        # constrain log_std inside [log_std_min, log_std_max]
+        z_logstd = torch.tanh(z_logstd)
+        z_logstd = args.log_std_min + 0.5 * (args.log_std_max - args.log_std_min) * (z_logstd + 1)
+
+        latent_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
+        # Get latent assignment to causal vars
+        target_assignment = self.prior.get_target_assignment(hard=False)
+        # Assign latent vals to their respective causal var
+        latent_causal_assignment = [target_assignment * latent_sample[i][:, None] for i in range(len(latent_sample))]
+        latent_causal_assignment = torch.flatten(latent_causal_assignment[0])[None, :]
+        # latent_causal_assignment = torch.stack(latent_causal_assignment, dim=0)
+
+        return latent_causal_assignment
+
+    def causal_loss(self, obs, intervention_targets, global_step):
+        imgs = obs.cuda()
+        target = intervention_targets.cuda()
+        labels = imgs
+
+        # En- and decode every element
+        z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
+        z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
+        z_sample = z_sample.unflatten(0, imgs.shape[:2])
+        z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
+        z_sample = z_sample.flatten(0, 1)
+        x_rec = self.decoder(z_sample.unflatten(0, imgs.shape[:2])[:, 1:].flatten(0, 1))
+        z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in
+                                             [z_sample, z_mean, z_logstd, x_rec]]
+
+        # Calculate KL divergence between every pair of frames
+        kld = self.prior.forward(z_sample=z_sample[:, 1:].flatten(0, 1),
+                                 z_mean=z_mean[:, 1:].flatten(0, 1),
+                                 z_logstd=z_logstd[:, 1:].flatten(0, 1),
+                                 target=target.flatten(0, 1),
+                                 z_shared=z_sample[:, :-1].flatten(0, 1),
+                                 matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(global_step)))
+        kld = kld.unflatten(0, (imgs.shape[0], -1))
+        # Calculate reconstruction loss
+        rec_loss = F.mse_loss(x_rec, labels[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
+        # Combine to full loss
+        loss = (kld * args.beta + rec_loss).mean()
+        # Target classifier
+        loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
+                                                  logger=None,
+                                                  target=intervention_targets,
+                                                  transition_prior=self.prior)
+        loss = loss + loss_model + loss_z * args.beta_classifier
+        # Mutual information estimator
+        scheduler_factor = self.mi_scheduler.get_factor(global_step)
+        loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
+                                                     logger=None,
+                                                     target=intervention_targets,
+                                                     transition_prior=self.prior,
+                                                     instant_prob=scheduler_factor)
+        loss = loss + loss_model_mi + loss_z_mi * args.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
+        # For stabilizing the mean, since it is unconstrained
+        loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
+        loss = loss + 0.1 * loss_z_reg
+
+        return loss, x_rec, labels
+
 
 if __name__ == "__main__":
     args = parser()
@@ -262,15 +442,15 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    # args.experiment_name = f'repeat{args.action_repeat}_chid{args.hidden_dims}_activation{args.activation_function}_' \
-    #                        f'latent{args.latent_dims}_aIC{args.action_in_critic}_setTrain{args.set_train}_beta{args.beta}_' \
-    #                        f'batches{args.num_minibatches}_anneal{args.anneal_lr}_rpo{args.rpo}_seed{args.seed}'
-    args.experiment_name = "dmc_test_cartpole_swingup_klclip"
+    args.experiment_name = f'runs/DMCWalker_defaultsettings_iCITRIS_seed{args.seed}'
     run_name = f"{args.experiment_name}"
     if args.state_baseline:
         args.set_train = False
-        args.anneal_lr = False
         args.save_img = False
+
+    if args.causal:
+        args.is_vae = True
+        args.state_baseline = False
 
     if args.track:
         import wandb
@@ -284,6 +464,11 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
+    writer = SummaryWriter(f"{run_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -293,24 +478,17 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    envs = gym.vector.SyncVectorEnv([make_env() for i in range(args.num_envs)])
+    envs = gym.vector.SyncVectorEnv([make_env(args.env_id) for _ in range(args.num_envs)])
     agent = Agent(envs).to(device)
 
-    agent_params = [param for name, param in agent.named_parameters() if name.startswith('actor') or name.startswith('critic')]
     if args.state_baseline:
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     else:
+        agent_params = [param for name, param in agent.named_parameters() if
+                        name.startswith('actor') or name.startswith('critic')]
         optimizer = optim.Adam([{'params': agent.encoder.parameters(), 'lr': args.encoder_lr},  # Encoder params
                                 {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
                                 {'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5}], lr=args.learning_rate)
-
-    if args.load_model:
-        path = str(pathlib.Path(__file__).parent.resolve()) + f'/runs/{run_name}/ppo_continuous_action.cleanrl_model'
-        if os.path.isfile(path):
-            print("Loading pretrained RL model")
-            agent.load_state_dict(torch.load(path))
-        else:
-            print("Pretrained RL model not found")
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -319,26 +497,11 @@ if __name__ == "__main__":
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    gae = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs = envs.reset()
-    next_obs = torch.Tensor(next_obs).to(device)
-    next_done = torch.zeros(args.num_envs).to(device)
-
-    writer = SummaryWriter(f"runs/{run_name}")
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
-
-    # RESET THE ENVIRONMENT
-    # TRY NOT TO MODIFY: start the game
-    global_step = 0
-    start_time = time.time()
-    next_obs = envs.reset()
+    next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
@@ -352,7 +515,6 @@ if __name__ == "__main__":
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
-        total_reward = 0
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
@@ -366,22 +528,29 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, next_done, infos = envs.step(action.cpu().numpy())
-            total_reward += reward
+            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-        print(f"global_step={global_step}, episodic_return={total_reward}")
-        writer.add_scalar("charts/episodic_return", total_reward, global_step)
+            if "episode" in infos:
+                print(f"global_step={global_step}, episodic_return={infos['episode']['r']}")
+                writer.add_scalar("charts/episodic_return", infos["episode"]["r"], global_step)
+                writer.add_scalar("charts/episodic_length", infos["episode"]["l"], global_step)
 
         # AGENT EVAL
         if args.set_train:
             agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
-            # TODO: This allows for integrating the action into the critic network
-            _, _, _, next_value = agent.get_action_and_value(x=next_obs)
-            next_value = next_value.reshape(1, -1)
+            if args.state_baseline:
+                next_value = agent.get_val(next_obs).reshape(1, -1)
+            if args.causal:
+                latent = agent.causal_rep(next_obs)
+                next_value = agent.get_val(latent).reshape(1, -1)
+            else:
+                _, latent = agent.encode_imgs(next_obs)
+                next_value = agent.get_val(latent).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -403,18 +572,27 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        interventions = torch.where(b_actions != 0, 0.0, 1.0)
+        # test = make_framestack(obs, interventions, seq_len=3)
+
+        datasets, data_loaders, data_name = load_data_new(args, b_obs, interventions, args.env_id)
+
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
+
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
-                end = start + args.minibatch_size
-                mb_inds = b_inds[start:end]
+            print(f"EPOCH{epoch}")
+            for x in data_loaders['train']:
+                img_pairs = x[0]
+                targets = x[1]
+                mb_inds = np.array(x[2])
+            # for start in range(0, args.batch_size, args.minibatch_size):
+            #     end = start + args.minibatch_size
+            #     mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(x=b_obs[mb_inds],
-                                                                              action=b_actions[mb_inds])
-
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -452,33 +630,36 @@ if __name__ == "__main__":
 
                 if args.state_baseline:
                     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                elif args.causal:
+                    rec_loss, rec_obs, target_obs = agent.causal_loss(img_pairs, targets, global_step)
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
                 else:
                     rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
                     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
 
-                if args.save_img:
-                    if epoch == 0 and start == 0:
-                        # Save image of an original + reconstruction every policy rollout
-                        path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
-
-                        original_imgs = torch.split(target_obs[0], 3)
-                        original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
-                        rec_imgs = torch.split(rec_obs[0], 3)
-
-                        rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
-
-                        cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255*original_imgs[1],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[0],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[1],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[2],
-                                                                                           cv2.COLOR_RGB2BGR))
+                # if args.save_img:
+                #     if epoch == 0 and start == 0:
+                #         # Save image of an original + reconstruction every policy rollout
+                #         path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+                #
+                #         original_imgs = torch.split(target_obs[0], 3)
+                #         original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
+                #         rec_imgs = torch.split(rec_obs[0], 3)
+                #
+                #         rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
+                #
+                #         cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255*original_imgs[1],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[0],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[1],
+                #                                                                            cv2.COLOR_RGB2BGR))
+                #         cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[2],
+                #                                                                            cv2.COLOR_RGB2BGR))
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -486,6 +667,7 @@ if __name__ == "__main__":
                 optimizer.step()
 
             if args.target_kl != 0.0 and approx_kl > args.target_kl:
+                print('huh?')
                 break
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
@@ -520,27 +702,10 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
-    #  TODO: Current setup: default PPO, framestack, action_repeat==2, no set_train, no logclipping
+    # TODO: Default:
+    #  - Action repeat = 2
 
-    # TODO: Different setups to test:
-    #  - RPO with default settings
-    #  - Current system with default settings now that L2 penalty is removed
-    #  - All different action repeats with default settings
-    #  - Different encoder lrs
-    #  - Different B values for VAE
-    #  - Ent coefficient with the correct values
-
-    #  DEFAULT SETTINGS:
-    #  - num_minibatches: 16
-    #  - learning_annealing: yes
-    #  - hidden_dims: 64
-    #  - activation: tanh
-    #  - action in critic: no
-    #  - VAE: true
-    #  - annealing: true
-
-
-    #   - encoder_lr: 1e-3, 1e-4, 1e-5
-    #   - beta: 1e-8, 1e-5, 1e-3
-
-
+    # TODO: Important to note:
+    #   - Action is not present in the critic network as in SAC+AE,
+    #   as the action is not available in PPO (could add it in with torch.no_grad)
+    #   - Shared architecture not used, as the performance was not that good

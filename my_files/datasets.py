@@ -38,7 +38,7 @@ class BaseDataset(data.Dataset):
         self.imgs = img_data
         self.targets = interventions
 
-        self._clean_up_data()
+        # self._clean_up_data()
         self.split_name = split
         if split.startswith('val'):
             self.split_name = self.split_name.replace('val', 'test')
@@ -51,11 +51,12 @@ class BaseDataset(data.Dataset):
         Push the channels to the PyTorch dimension if needed
         :return:
         """
-        if len(self.imgs.shape) == 5:
-            self.imgs = self.imgs.permute(0, 1, 4, 2, 3)  # Push channels to PyTorch dimension
-        else:
-            pass
-            # self.imgs = self.imgs.permute(0, 3, 1, 2)
+        self.imgs = self.imgs[:, 0:3, :, :]
+        # if len(self.imgs.shape) == 5:
+        #     self.imgs = self.imgs.permute(0, 1, 4, 2, 3)  # Push channels to PyTorch dimension
+        # else:
+        #     pass
+        #     # self.imgs = self.imgs.permute(0, 3, 1, 2)
 
         self.target_names = ReacherDataset.CAUSAL_VAR_NAMES
         # print(f'Using the causal variables {self.target_names}')

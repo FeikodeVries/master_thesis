@@ -5,11 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-import pytorch_lightning as pl
 import pathlib
 import random
 
-from pytorch_lightning.callbacks import ModelCheckpoint
 
 
 # METHODS: MODULES
@@ -194,6 +192,7 @@ class InstantaneousPrior(nn.Module):
                  lambda_sparse=0.02,
                  gumbel_temperature=1.0,
                  num_graph_samples=8,
+                 framestack=3,
                  graph_learning_method='ENCO',
                  autoregressive=False):
         """
@@ -239,8 +238,7 @@ class InstantaneousPrior(nn.Module):
             MultivarLinear(c_hid, c_hid, [self.num_latents]),
             MultivarLayerNorm(c_hid, [self.num_latents]),
             nn.SiLU(),
-            MultivarLinear(c_hid, 2,
-                           [self.num_latents]),
+            MultivarLinear(c_hid, 2, [self.num_latents]),
             MultivarStableTanh(2, [self.num_latents])
         )
         self.net[-2].weight.data.fill_(0.0)
@@ -294,10 +292,10 @@ class InstantaneousPrior(nn.Module):
         num_graph_samples = self.num_graph_samples if num_graph_samples <= 0 else num_graph_samples
 
         # Target preparation
-        if len(target.shape) == 1:
-            target_oh = F.one_hot(target, num_classes=self.num_blocks)
-        else:
-            target_oh = target
+        # if len(target.shape) == 1:
+        #     target_oh = F.one_hot(target, num_classes=self.num_blocks)
+        # else:
+        target_oh = target
         target_probs = torch.softmax(self.target_params, dim=-1)
         target_samples = F.gumbel_softmax(self.target_params[None].expand(target.shape[0], -1, -1),
                                           tau=self.gumbel_temperature, hard=True)
@@ -360,8 +358,8 @@ class InstantaneousPrior(nn.Module):
             z_shared = [z_shared]
 
         # Obtain predictions from network
-        z_inp = torch.cat(
-            [z_sample[:, :, None, None, None, :] * latent_mask, latent_mask * 2 - 1, target_input] + z_shared, dim=-1)
+        z_inp = torch.cat([z_sample[:, :, None, None, None, :] * latent_mask,
+                           latent_mask * 2 - 1, target_input] + z_shared, dim=-1)
         s = 1
         # For efficiency, we run 1 sample differentiably for the distribution parameters,
         # and all without gradients since ENCO doesn't need gradients through the networks
@@ -537,31 +535,6 @@ def get_act_fn(act_fn_name):
     return act_fn_func
 
 
-def train_model(model_class, train_loader, max_epochs=200, check_val_every_n_epoch=1, load_pretrained=True,
-                gradient_clip_val=1, cluster=False, seed=42, save_last_model=False, data_dir=None,
-                val_track_metric='val_loss', callback_kwargs=None, files_to_save=None, **kwargs):
-    trainer_args = {}
-    trainer_args['enable_progress_bar'] = False
-    trainer_args['log_every_n_steps'] = 2
-    root_dir = str(pathlib.Path(__file__).parent.resolve()) + f'/data/model_checkpoints/active_iCITRIS/'
-    log_dir = str(pathlib.Path(__file__).parent.resolve().parents[0]) + f'/runs/'
-    # TODO: Check if logging is actually disabled and the system still works
-    checkpoint_callback = ModelCheckpoint(dirpath=root_dir, save_last=True)
-    trainer = pl.Trainer(default_root_dir=log_dir, logger=False, callbacks=[checkpoint_callback], accelerator='auto',
-                         max_epochs=max_epochs, check_val_every_n_epoch=1, gradient_clip_val=gradient_clip_val,
-                         **trainer_args)
-    # trainer.logger._default_hp_metric = None
-    pretrained_filename = root_dir + 'last.ckpt'
-    pl.seed_everything(seed)
-    if load_pretrained and os.path.isfile(pretrained_filename):
-        print('model found')
-        model = model_class.load_from_checkpoint(pretrained_filename, **kwargs)
-    else:
-        model = model_class(**kwargs)
-
-    trainer.fit(model, train_loader)
-
-
 def get_default_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default="../data/")
@@ -597,7 +570,6 @@ def update_enco_params(self, *args, **kwargs):
 
 def preprocess_obs(obs, bits=5):
     """Preprocessing image, see https://arxiv.org/abs/1807.03039."""
-    # TODO: This preprocessing step actually makes the observations completely black
     bins = 2**bits
     assert obs.dtype == torch.float32
     if bits < 8:

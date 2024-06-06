@@ -20,8 +20,14 @@ from collections import defaultdict
 #
 # print(d)
 from torch.distributions.normal import Normal
-from dm_control.suite import ALL_TASKS
-print(*ALL_TASKS, sep="\n")
+# from shimmy.registration import DM_CONTROL_SUITE_ENVS
+# import gymnasium as gym
+# env_ids = [f"dm_control/{'-'.join(item)}-v0" for item in DM_CONTROL_SUITE_ENVS]
+# env = gym.make(env_ids[0])
+# print(env_ids)
+import numpy as np
+b_inds = np.arange(2048)
+test = 1
 
 # OLD CODE: ACTOR CRITIC WITH OWN ENCODERS
 # self.actor = actor_critic.Actor(
@@ -241,3 +247,12 @@ print(*ALL_TASKS, sep="\n")
 #     pos = torch.stack([pos_x, pos_y], dim=stack_dim)
 #     return pos
 
+# class FlattenFirst(gym.ObservationWrapper):
+#     def __init__(self, env):
+#         super().__init__(env)
+#         shape = self.observation_space.shape
+#         self.observation_space = spaces.Box(shape=[shape[0] * shape[1], shape[2], shape[3]],
+#                                             low=0, high=255, dtype=np.uint8)
+#
+#     def observation(self, observation):
+#         return observation

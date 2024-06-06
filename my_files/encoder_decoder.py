@@ -23,7 +23,6 @@ class PixelEncoder(nn.Module):
 
         self.feature_dim = feature_dim
         self.num_layers = num_layers
-
         self.convs = nn.ModuleList([nn.Conv2d(obs_shape[0], num_filters, 3, stride=2)])
         for i in range(num_layers - 1):
             self.convs.append(nn.Conv2d(num_filters, num_filters, 3, stride=1))
@@ -117,12 +116,14 @@ class IdentityEncoder(nn.Module):
 
 
 class PixelDecoder(nn.Module):
-    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32):
+    def __init__(self, obs_shape, feature_dim, action_size, num_layers=2, num_filters=32, causal=False):
         super().__init__()
 
         self.num_layers = num_layers
         self.num_filters = num_filters
         self.out_dim = OUT_DIM[num_layers]
+
+        # input_dim = feature_dim if not causal else (feature_dim*action_size)
 
         self.fc = nn.Linear(feature_dim, num_filters * self.out_dim * self.out_dim)
 
@@ -178,9 +179,9 @@ def make_encoder(encoder_type, obs_shape, feature_dim, num_layers, num_filters, 
     return _AVAILABLE_ENCODERS[encoder_type](obs_shape, feature_dim, num_layers, num_filters, variational)
 
 
-def make_decoder(decoder_type, obs_shape, feature_dim, num_layers, num_filters):
+def make_decoder(decoder_type, obs_shape, action_size, feature_dim, num_layers, num_filters, causal=False):
     assert decoder_type in _AVAILABLE_DECODERS
 
-    return _AVAILABLE_DECODERS[decoder_type](obs_shape, feature_dim, num_layers, num_filters)
+    return _AVAILABLE_DECODERS[decoder_type](obs_shape, feature_dim, action_size, num_layers, num_filters, causal)
 
 

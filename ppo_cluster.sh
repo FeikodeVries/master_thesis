@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ppo_vae
-#SBATCH --time=12:00:00
+#SBATCH --time=08:00:00
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=defq
@@ -27,16 +27,17 @@ cd $HOME/experiments
 
 hidden_dims=(64 128 256 512 1024)
 latent_space=(25 64 84 96 128 256 512)
+seeds=(18 53 4 72 97 10 23 35 64 88)
 act_fns=('relu', 'tanh', 'silu')
 latent=${latent_space[SLURM_ARRAY_TASK_ID]}
 c_hid=${hidden_dims[SLURM_ARRAY_TASK_ID]}
 act_fn=${act_fns[SLURM_ARRAY_TASK_ID]}
+seed=${seeds[SLURM_ARRAY_TASK_ID]}
 
 # Simple trick to create a unique directory for each run of the script
-echo $$
-mkdir o`echo $$`_seed$
-cd o`echo $$`_nol2_seed$
+echo $$ $seed $1
+mkdir o`echo $$`_dmcae_seed$seed
+cd o`echo $$`_dmcae_seed$seed
 
 # Run the actual experiment.
-MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $latent
-
+MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed $1

@@ -113,8 +113,8 @@ class TargetClassifier(nn.Module):
                 zero_cond_zero = 1 - one_cond_zero
                 new_cond_steps = torch.stack([target.shape[0] * target.shape[1] - target_sums, target_sums], dim=-1)
                 update_factor = (self.dist_cond_steps / (self.dist_cond_steps + new_cond_steps))[None, :, :, None]
-                cond_dist = torch.stack([zero_cond_zero, one_cond_zero, zero_cond_one, one_cond_one], dim=-1).unflatten(
-                    -1, (2, 2))
+                cond_dist = torch.stack([zero_cond_zero, one_cond_zero,
+                                         zero_cond_one, one_cond_one], dim=-1).unflatten(-1, (2, 2))
                 self.avg_cond_dist.mul_(update_factor).add_(cond_dist * (1 - update_factor))
                 self.dist_cond_steps.add_(new_cond_steps)
             self.dist_steps += 1
