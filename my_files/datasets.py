@@ -3,14 +3,7 @@ Methods to implement the classes
 """
 import torch
 import torch.utils.data as data
-import torch.nn.functional as F
-from torchvision import transforms
-import os
-import json
-import numpy as np
 from collections import OrderedDict
-from tqdm.auto import tqdm
-import pathlib
 
 
 class BaseDataset(data.Dataset):

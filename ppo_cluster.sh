@@ -14,8 +14,10 @@
 # Load GPU drivers
 
 ## Enable the following two lines for DAS5
-module load cuda12.1/toolkit
-module load cuDNN/cuda12.1
+module load cuda12.3/toolkit
+module load cuDNN/cuda12.3
+
+# module load cuda11.3/toolkit/11.3.1
 
 # This loads the anaconda virtual environment with our packages
 source $HOME/.bashrc
@@ -36,8 +38,9 @@ seed=${seeds[SLURM_ARRAY_TASK_ID]}
 
 # Simple trick to create a unique directory for each run of the script
 echo $$ $seed $1
-mkdir o`echo $$`_dmcae_seed$seed
-cd o`echo $$`_dmcae_seed$seed
+mkdir o`echo $$`_dmc_causal_seed$seed
+cd o`echo $$`_dmc_causal_seed$seed
 
 # Run the actual experiment.
-MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed $1
+export MUJOCO_GL=egl
+python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --is_vae --causal --beta 1 --framestack 2 --seed $seed

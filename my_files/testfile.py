@@ -25,9 +25,7 @@ from torch.distributions.normal import Normal
 # env_ids = [f"dm_control/{'-'.join(item)}-v0" for item in DM_CONTROL_SUITE_ENVS]
 # env = gym.make(env_ids[0])
 # print(env_ids)
-import numpy as np
-b_inds = np.arange(2048)
-test = 1
+print(1e-3)
 
 # OLD CODE: ACTOR CRITIC WITH OWN ENCODERS
 # self.actor = actor_critic.Actor(

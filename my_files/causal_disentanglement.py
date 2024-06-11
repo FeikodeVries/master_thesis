@@ -103,8 +103,12 @@ class TargetClassifier(nn.Module):
             self.avg_dist.mul_(self.dist_steps / (self.dist_steps + 1)).add_(new_dist * (1. / (self.dist_steps + 1)))
 
             if hasattr(self, 'avg_cond_dist'):
-                target_sums = target.sum(dim=[0, 1])
-                target_prod = (target[..., None, :] * target[..., :, None]).sum(dim=[0, 1])
+                # TODO: Rescale target sums so that the value is within a reasonable range
+                sum_scale = target.shape[0] * target.shape[1]
+                target_sums = target.sum(dim=[0, 1]) / sum_scale
+                # target_sums = target
+                target_prod = (target[..., None, :] * target[..., :, None]).sum(dim=[0, 1]) / sum_scale
+                # target_prod = (target[..., None, :] * target[..., :, None])
 
                 one_cond_one = target_prod / target_sums[None, :].clamp(min=1e-5)
                 zero_cond_one = 1 - one_cond_one
@@ -145,6 +149,7 @@ class TargetClassifier(nn.Module):
         if self.training:
             self._step_exp_avg()
             self._update_dist(target)
+
         # Joint preparations
         batch_size = z_sample.shape[0]
         time_steps = z_sample.shape[1] - 1
@@ -178,8 +183,7 @@ class TargetClassifier(nn.Module):
         z_sample_model = z_sample.detach()
         target_assignment_det = target_assignment.detach()
         model_inps = torch.cat(
-            [z_sample_model[:, :-1, :], z_sample_model[:, 1:, :] * target_assignment_det, target_assignment_det],
-            dim=-1)
+            [z_sample_model[:, :-1, :], z_sample_model[:, 1:, :] * target_assignment_det, target_assignment_det], dim=-1)
         model_inps = model_inps.flatten(0, 2)
         model_pred = self.classifiers(model_inps)
         loss_model = F.binary_cross_entropy_with_logits(model_pred, exp_target, reduction='none')
@@ -201,10 +205,8 @@ class TargetClassifier(nn.Module):
         z_pred = self.exp_classifiers(z_inps)
         z_pred_unflatten = z_pred.unflatten(0, (batch_size * time_steps, num_targets))
         if hasattr(self, 'avg_cond_dist'):
-            avg_dist_labels = self.avg_cond_dist[None, None, :, :, 1, 1] * target[:, :, None, :] + self.avg_cond_dist[
-                                                                                                   None, None, :, :, 0,
-                                                                                                   1] * (
-                                          1 - target[:, :, None, :])
+            avg_dist_labels = self.avg_cond_dist[None, None, :, :, 1, 1] * target[:, :, None, :] + \
+                              self.avg_cond_dist[None, None, :, :, 0, 1] * (1 - target[:, :, None, :])
             avg_dist_labels = avg_dist_labels.permute(0, 1, 3, 2).flatten(0, 1)
             avg_dist_labels = torch.cat(
                 [avg_dist_labels, self.avg_dist[None, None, :, 1].expand(avg_dist_labels.shape[0], 2, -1)], dim=1)
@@ -295,8 +297,7 @@ class InstantaneousTargetClassifier(TargetClassifier):
             target_assignment = torch.cat(
                 [target_assignment, target_assignment.new_zeros(target_assignment.shape[:-1] + (1,))], dim=-1)
         target_assignment = torch.cat(
-            [target_assignment, target_assignment.new_ones(target_assignment.shape[:-1] + (1,))],
-            dim=-1)  # All latents slot
+            [target_assignment, target_assignment.new_ones(target_assignment.shape[:-1] + (1,))], dim=-1)  # All latents slot
         num_targets = target_assignment.shape[-1]
 
         target_assignment = target_assignment.transpose(-2, -1)  # shape [batch, time_steps, num_targets, latent_vars]
@@ -313,20 +314,16 @@ class InstantaneousTargetClassifier(TargetClassifier):
                 graph_samples_anc, graph_samples)
         # Add self-connections since we want to identify interventions from itself as well
         graph_samples_eye = graph_samples + torch.eye(graph_samples.shape[-1], device=graph_samples.device)[None, None]
-        latent_to_causal = (
-                    target_assignment[:, :, :graph_probs.shape[0], :, None] * graph_samples_eye[:, :, :, None, :]).sum(
-            dim=-3)
+        latent_to_causal = (target_assignment[:, :, :graph_probs.shape[0], :, None] * graph_samples_eye[:, :, :, None, :]).sum(dim=-3)
         latent_mask = latent_to_causal.transpose(-2, -1)  # shape: [batch_size, time_steps, causal_vars, latent_vars]
-        latent_mask = torch.cat([latent_mask] +
-                                ([latent_mask.new_zeros(batch_size, time_steps, 1, num_latents)] if (
-                                            latent_mask.shape[2] == num_classes) else []) +
+        latent_mask = torch.cat([latent_mask] + ([latent_mask.new_zeros(batch_size, time_steps, 1, num_latents)] if
+                                                 (latent_mask.shape[2] == num_classes) else []) +
                                 [latent_mask.new_ones(batch_size, time_steps, 1, num_latents)],
                                 dim=-2)  # shape [batch, time_steps, num_targets, latent_vars]
         # Model step => Cross entropy loss on targets for all sets of latents
         z_sample_model = z_sample.detach()
         latent_mask_det = latent_mask.detach()
-        model_inps = torch.cat([z_sample_model[:, :-1], z_sample_model[:, 1:] * latent_mask_det, latent_mask_det],
-                               dim=-1)
+        model_inps = torch.cat([z_sample_model[:, :-1], z_sample_model[:, 1:] * latent_mask_det, latent_mask_det], dim=-1)
         model_inps = model_inps.flatten(0, 2)
         model_pred = self.classifiers(model_inps)
         loss_model = F.binary_cross_entropy_with_logits(model_pred, exp_target, reduction='none')
@@ -387,7 +384,8 @@ class InstantaneousTargetClassifier(TargetClassifier):
             avg_dist_labels = self.avg_dist[None, :, 1]
         z_targets = torch.where(loss_mask == 1, exp_target, avg_dist_labels)
         loss_z = F.binary_cross_entropy_with_logits(z_pred, z_targets, reduction='none')
-        pos_weight = num_classes  # Beneficial to weight the cross entropy loss for true target higher, especially for many causal variables
+        # Beneficial to weight the cross entropy loss for true target higher, especially for many causal variables
+        pos_weight = num_classes
         loss_z = loss_z * (pos_weight * (loss_mask == 1).float() + 1 * (loss_mask == 0).float())
         loss_z = loss_z.mean()
         loss_z = num_targets * loss_z

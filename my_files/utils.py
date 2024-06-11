@@ -369,7 +369,8 @@ class InstantaneousPrior(nn.Module):
             preds = preds.unflatten(0, (batch_size, num_z_samples, s, self.num_blocks))
             with torch.no_grad():
                 z_inp_flat_nograd = z_inp[:, :, s:].detach().flatten(0, 3)
-                if self.num_latents <= 16:
+                # TODO: Feed automatically to simpler version? --> default is 16 (Needed to reduce VRAM usage)
+                if self.num_latents <= 50:
                     preds_nograd = self.net(z_inp_flat_nograd)
                 else:
                     preds_nograd = torch.cat([self.net(z_part) for z_part in z_inp_flat_nograd.chunk(2, dim=0)], dim=0)
@@ -401,6 +402,7 @@ class InstantaneousPrior(nn.Module):
         else:
             kld_vae = kld[:, :s].mean(dim=1)
         # kld_vae: shape [batch, causal_vars, latent_vars]
+
         kld_vae = (kld_vae * (target_probs.transpose(0, 1)[None] + 1e-4)).sum(dim=1)  # Weighted mean over causal vars
         kld_vae = kld_vae.sum(dim=-1)  # Sum over latents
         # kld_vae: shape [batch]

@@ -115,6 +115,26 @@ class FrameStack(gym.Wrapper):
         return np.concatenate(np.array(self._frames), axis=0)
 
 
+class NormObsSize(gym.Wrapper):
+    def __init__(self, env):
+        gym.Wrapper.__init__(self, env)
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=1,
+            shape=env.observation_space.shape,
+            dtype=float
+        )
+
+    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        obs = obs / 255.
+        return obs, info
+
+    def step(self, action):
+        obs, reward, termination, truncation, info = self.env.step(action)
+        obs = obs / 255.
+        return obs, reward, termination, truncation, info
+
 class FrameSkip(gym.Wrapper):
     def __init__(self, env, frameskip=1):
         gym.Wrapper.__init__(self, env)

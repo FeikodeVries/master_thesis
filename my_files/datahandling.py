@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 import torch.utils.data as data
-from cleanrl.my_files.datasets import ReacherDataset, WalkerDataset, PendulumDataset, CheetahDataset
+from my_files.datasets import ReacherDataset, WalkerDataset, PendulumDataset, CheetahDataset
 
 
 class DataHandling:
@@ -45,41 +45,6 @@ class DataHandling:
         return filepath
 
 
-# def load_datasets(args, env_name):
-#     pl.seed_everything(args.seed)
-#     print('Loading data...')
-#
-#     # Extend for different models
-#     if env_name == 'Reacher':
-#         DataClass = ReacherDataset
-#         dataset_args = {}
-#         test_args = lambda train_set: {'causal_vars': train_set.target_names}
-#     elif env_name == 'Walker':
-#         DataClass = WalkerDataset
-#         dataset_args = {}
-#         test_args = lambda train_set: {'causal_vars': train_set.target_names}
-#     else:
-#         pass
-#     folder = str(pathlib.Path(__file__).parent.resolve()) + '/data/'
-#
-#     train_data = DataClass(data_folder=folder, split='train', single_image=False, seq_len=2, **dataset_args)
-#     # val_data = DataClass(data_folder=folder, split='val_indep', single_image=True, **dataset_args, **test_args(train_data))
-#     train_loader = data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True,
-#                                    pin_memory=True, drop_last=True, num_workers=args.num_workers)
-#
-#     print(f'Training dataset size: {len(train_data)} / {len(train_loader)}')
-#
-#     datasets = {
-#         'train': train_data,
-#         # 'val': val_data
-#     }
-#     data_loaders = {
-#         'train': train_loader
-#     }
-#
-#     return datasets, data_loaders, env_name.lower()
-
-
 def load_data_new(args, img_data, interventions, env_name, seq_len=3):
     print('Loading data...')
     env_name = env_name.split('-')[0]
@@ -112,7 +77,7 @@ def load_data_new(args, img_data, interventions, env_name, seq_len=3):
     train_data = DataClass(data_folder=folder, img_data=img_data, interventions=interventions,
                            split='train', single_image=False, seq_len=seq_len, **dataset_args)
     # TODO: pin_memory and num_workers had to be disabled to allow for the use of dataloaders strangely
-    train_loader = data.DataLoader(train_data, batch_size=args.minibatch_size, shuffle=True,
+    train_loader = data.DataLoader(train_data, batch_size=args.minibatch_size, shuffle=False,
                                    pin_memory=False, drop_last=True, num_workers=0)
 
     datasets = {

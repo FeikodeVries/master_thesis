@@ -5,9 +5,9 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import random
 import time
-import cProfile, pstats
+# import cProfile, pstats
 import gymnasium as gym
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -61,7 +61,7 @@ def parser():
                         help="the learning rate of the optimizer")
     parser.add_argument('--num_envs', type=int, default=1,
                         help="the number of parallel game environments")
-    parser.add_argument('--num_steps', type=int, default=1024,
+    parser.add_argument('--num_steps', type=int, default=2048,
                         help="the number of steps to run in each environment per policy rollout (Always 1000 for DMC)")
     parser.add_argument('--anneal_lr', action='store_false',
                         help="Toggle learning rate annealing for policy and value networks")
@@ -93,9 +93,9 @@ def parser():
                         help="whether to train base PPO on states or on pixels")
     parser.add_argument('--action_repeat', type=int, default=2,
                         help="for how many frames to hold an action, 1 the default, regular action")
-    parser.add_argument('--framestack', type=int, default=1,
+    parser.add_argument('--framestack', type=int, default=3,
                         help="How many frames to stack in a rolling manner")
-    parser.add_argument('--save_img', action='store_false',
+    parser.add_argument('--save_img', action='store_true',
                         help="whether to save reconstructions of the images")
     parser.add_argument('--hidden_dims', type=int, default=64,
                         help="how many hidden dimensions for the actor-critic networks")
@@ -111,7 +111,7 @@ def parser():
                         help="whether to do model.train()")
     parser.add_argument('--is_vae', action='store_true',
                         help="whether to use a VAE or an AE")
-    parser.add_argument('--beta', type=float, default=1.0,
+    parser.add_argument('--beta', type=float, default=1e-8,
                         help="the coefficient for the kld on the VAE loss")
     parser.add_argument('--encoder_lr', type=float, default=1e-3,
                         help="learning rate for the encoder")
@@ -121,8 +121,11 @@ def parser():
                         help="rpo alpha")
 
     # MY ARGUMENTS (Causal)
-    parser.add_argument('--causal', action='store_false',
+    parser.add_argument('--causal', action='store_true',
                         help="whether to use the causal vae to train PPO")
+    parser.add_argument('--causal_coef', type=float, default=1.0)
+    parser.add_argument('--counter_lr', type=float, default=1e-3)
+    parser.add_argument('--graph_lr', type=float, default=5e-4)
     parser.add_argument('--lambda_sparse', type=float, default=0.02,
                         help="regularizer for encouraging sparse graphs")
     parser.add_argument('--num_graph_samples', type=int, default=8,
@@ -136,10 +139,11 @@ def parser():
     parser.add_argument('--log_std_max', type=int, default=2,
                         help='')
     parser.add_argument('--beta_classifier', type=float, default=2.0,
-                        help='')
+                        help='Default is 2.0')
     parser.add_argument('--beta_mi_estimator', type=float, default=2.0,
+                        help='Default is 2.0')
+    parser.add_argument('--warmup', type=int, default=100,
                         help='')
-
     # MAKE AT RUNTIME
     parser.add_argument('--experiment_name', type=str, default='default',
                         help="name of the experiment")
@@ -173,8 +177,10 @@ def make_env(env_id):
             env = gym.wrappers.AddRenderObservation(env, render_only=True)
             env = mywrapper.ResizeObservation(env, shape=args.img_size)
             env = mywrapper.FrameSkip(env, frameskip=args.action_repeat)
-            env = mywrapper.FrameStack(env, k=args.framestack)
-
+            if not args.causal:
+                env = mywrapper.FrameStack(env, k=args.framestack)
+            else:
+                env = mywrapper.NormObsSize(env)
             env = gym.wrappers.ClipAction(env)
             env = gym.wrappers.NormalizeReward(env, gamma=args.gamma)
             env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
@@ -204,20 +210,6 @@ def weight_init(m):
         nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
 
 
-def make_framestack(imgs, interventions, seq_len):
-    stacked_imgs = []
-    for idx in range(len(imgs)):
-        returns = []
-
-        img_pair = imgs[idx:idx + seq_len]
-        target = interventions[idx:idx + seq_len - 1]
-        returns += [target]
-        returns = [img_pair] + returns + [idx]
-        stacked_imgs.append(returns)
-
-    return stacked_imgs
-
-
 class Agent(nn.Module):
     """
     Combines the PPO agent with the citris implementation to allow for the gradients to flow through the value function
@@ -232,7 +224,7 @@ class Agent(nn.Module):
             act_fn = nn.SiLU()
 
         input_dims = np.array(envs.single_observation_space.shape).prod() if args.state_baseline else args.latent_dims
-        input_dims = input_dims if not args.causal else (args.latent_dims * np.prod(envs.single_action_space.shape))
+        # input_dims = input_dims if not args.causal else (args.latent_dims * np.prod(envs.single_action_space.shape))
 
         self.critic = nn.Sequential(
             layer_init(nn.Linear(input_dims, args.hidden_dims)), act_fn,
@@ -284,23 +276,23 @@ class Agent(nn.Module):
                 use_normalization=True,
                 use_conditional_targets=True
             )
-        self.mi_estimator = causal.MIEstimator(num_latents=args.latent_dims,
-                                               num_blocks=np.prod(envs.single_action_space.shape),
-                                               c_hid=args.hidden_dims,
-                                               momentum_model=0.9,
-                                               gumbel_temperature=1.0)
-        self.mi_scheduler = utils.SineWarmupScheduler(warmup=50000,
-                                                      start_factor=0.004,
-                                                      end_factor=1.0,
-                                                      offset=20000)
-        self.matrix_exp_scheduler = utils.SineWarmupScheduler(warmup=100000,
-                                                              start_factor=-6,
-                                                              end_factor=4,
-                                                              offset=10000)
-        self.causal_encoder = None
-        self.all_val_dists = defaultdict(list)
-        self.all_v_dicts = []
-        self.prior_t1 = self.prior
+            self.mi_estimator = causal.MIEstimator(num_latents=args.latent_dims,
+                                                   num_blocks=np.prod(envs.single_action_space.shape),
+                                                   c_hid=args.hidden_dims,
+                                                   momentum_model=0.9,
+                                                   gumbel_temperature=1.0)
+            self.mi_scheduler = utils.SineWarmupScheduler(warmup=50000,
+                                                          start_factor=0.004,
+                                                          end_factor=1.0,
+                                                          offset=20000)
+            self.matrix_exp_scheduler = utils.SineWarmupScheduler(warmup=100000,
+                                                                  start_factor=-6,
+                                                                  end_factor=4,
+                                                                  offset=10000)
+            self.causal_encoder = None
+            self.all_val_dists = defaultdict(list)
+            self.all_v_dicts = []
+            self.prior_t1 = self.prior
 
         if args.set_train:
             self.train()
@@ -332,7 +324,8 @@ class Agent(nn.Module):
             latent = x
             action_mean = self.actor(latent)
         elif args.causal:
-            latent = self.causal_rep(x)
+            # latent = self.causal_rep(x)
+            _, latent = self.encode_imgs(x)
             action_mean = self.actor(latent.detach())
         else:
             _, latent = self.encode_imgs(x)
@@ -378,7 +371,7 @@ class Agent(nn.Module):
 
         latent_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars
-        target_assignment = self.prior.get_target_assignment(hard=False)
+        target_assignment = self.prior.get_target_assignment(hard=True)
         # Assign latent vals to their respective causal var
         latent_causal_assignment = [target_assignment * latent_sample[i][:, None] for i in range(len(latent_sample))]
         latent_causal_assignment = torch.flatten(latent_causal_assignment[0])[None, :]
@@ -386,17 +379,21 @@ class Agent(nn.Module):
 
         return latent_causal_assignment
 
-    def causal_loss(self, obs, intervention_targets, global_step):
-        imgs = obs.cuda()
+    def causal_loss(self, imgs, intervention_targets, global_step):
+        imgs = imgs.cuda()
         target = intervention_targets.cuda()
-        labels = imgs
 
         # En- and decode every element
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
+
         z_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         z_sample = z_sample.unflatten(0, imgs.shape[:2])
         z_sample[:, 0] = z_mean.unflatten(0, imgs.shape[:2])[:, 0]
         z_sample = z_sample.flatten(0, 1)
+
+        # Preprocess obs --> normalise around 0
+        imgs = utils.preprocess_obs(imgs*255.)
+
         x_rec = self.decoder(z_sample.unflatten(0, imgs.shape[:2])[:, 1:].flatten(0, 1))
         z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in
                                              [z_sample, z_mean, z_logstd, x_rec]]
@@ -410,15 +407,20 @@ class Agent(nn.Module):
                                  matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(global_step)))
         kld = kld.unflatten(0, (imgs.shape[0], -1))
         # Calculate reconstruction loss
-        rec_loss = F.mse_loss(x_rec, labels[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
+        # TODO: By summing it like this, the reconstruction is much more heavily weighted in the overall loss
+        rec_loss = F.mse_loss(x_rec, imgs[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
         # Combine to full loss
         loss = (kld * args.beta + rec_loss).mean()
+
+        # logging = {'kld': kld.mean(), 'rec_loss': rec_loss.mean(), 'causal_loss': loss}
+        #
+        # return loss, x_rec, imgs, logging
         # Target classifier
         loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
                                                   logger=None,
                                                   target=intervention_targets,
                                                   transition_prior=self.prior)
-        loss = loss + loss_model + loss_z * args.beta_classifier
+        loss = loss + loss_model * args.beta_classifier + loss_z * args.beta_classifier
         # Mutual information estimator
         scheduler_factor = self.mi_scheduler.get_factor(global_step)
         loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
@@ -426,23 +428,27 @@ class Agent(nn.Module):
                                                      target=intervention_targets,
                                                      transition_prior=self.prior,
                                                      instant_prob=scheduler_factor)
-        loss = loss + loss_model_mi + loss_z_mi * args.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
+        loss = loss + loss_model_mi * args.beta_mi_estimator + loss_z_mi * args.beta_mi_estimator * \
+               (1.0 + 2.0 * scheduler_factor)
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
 
-        return loss, x_rec, labels
+        logging = {'kld': kld.mean(), 'rec_loss': rec_loss.mean(), 'intv_classifier_z': loss_z,
+                   'mi_estimator_model': loss_model_mi, 'mi_estimator_z': loss_z_mi,
+                   'mi_estimator_factor': scheduler_factor, 'reg_loss': loss_z_reg, 'causal_loss': loss}
+
+        return loss, x_rec, imgs, logging
 
 
 if __name__ == "__main__":
     args = parser()
-    # args = tyro.cli(Args)
     # profiler = cProfile.Profile()
     # profiler.enable()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
-    args.experiment_name = f'runs/DMCWalker_defaultsettings_iCITRIS_seed{args.seed}'
+    args.experiment_name = f'runs/DMCWalker_isCausal{args.causal}_isVAE{args.is_vae}_seed{args.seed}'
     run_name = f"{args.experiment_name}"
     if args.state_baseline:
         args.set_train = False
@@ -483,12 +489,36 @@ if __name__ == "__main__":
 
     if args.state_baseline:
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    elif args.causal:
+        graph_params, counter_params, agent_params, other_params = [], [], [], []
+        for name, param in agent.named_parameters():
+            if name.startswith('prior.enco') or name.startswith('prior.notears'):
+                graph_params.append(param)
+            elif name.startswith('intv_classifier') or name.startswith('mi_estimator'):
+                counter_params.append(param)
+            elif name.startswith('actor') or name.startswith('critic'):
+                agent_params.append(param)
+            elif not (name.startswith('encoder') or name.startswith('decoder')):
+                other_params.append(param)
+        optimizer = optim.Adam(
+            [{'params': agent_params, 'name':'agent_params', 'lr': args.learning_rate, 'eps': 1e-5},
+             {'params': graph_params, 'name':'', 'lr': args.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
+             {'params': counter_params, 'name':'', 'lr': 2 * args.counter_lr, 'weight_decay': 1e-4},
+             {'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6}, # Encoder params
+             {'params': agent.decoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},
+             {'params': other_params, 'name':'', 'lr': args.counter_lr, 'weight_decay': 0.0}], lr=args.learning_rate)
     else:
         agent_params = [param for name, param in agent.named_parameters() if
                         name.startswith('actor') or name.startswith('critic')]
-        optimizer = optim.Adam([{'params': agent.encoder.parameters(), 'lr': args.encoder_lr},  # Encoder params
-                                {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
-                                {'params': agent_params, 'lr': args.learning_rate, 'eps': 1e-5}], lr=args.learning_rate)
+        # TODO: Add weight decay to encoder as well
+        optimizer = optim.Adam([{'params': agent_params, 'name': 'agent_params', 'lr': args.learning_rate, 'eps': 1e-5},
+                                {'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Encoder params
+                                {'params': agent.decoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
+                                ], lr=args.learning_rate)
+
+    # TODO: Clip weights during the backpropagation, instead of after it
+    # for param in agent.parameters():
+    #     param.register_hook(lambda grad: torch.clamp(grad, -args.max_grad_norm, args.max_grad_norm))
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -546,7 +576,8 @@ if __name__ == "__main__":
             if args.state_baseline:
                 next_value = agent.get_val(next_obs).reshape(1, -1)
             if args.causal:
-                latent = agent.causal_rep(next_obs)
+                # latent = agent.causal_rep(next_obs)
+                _, latent = agent.encode_imgs(next_obs)
                 next_value = agent.get_val(latent).reshape(1, -1)
             else:
                 _, latent = agent.encode_imgs(next_obs)
@@ -573,24 +604,39 @@ if __name__ == "__main__":
         b_values = values.reshape(-1)
 
         interventions = torch.where(b_actions != 0, 0.0, 1.0)
-        # test = make_framestack(obs, interventions, seq_len=3)
+        # stacked_interventions = []
+        # for idx in range(len(interventions)):
+        #     target = interventions[idx:idx + args.framestack - 1]
+        #     if target.shape[0] != args.framestack - 1:
+        #         target = torch.cat((target, interventions[idx][None,:]), dim=0)
+        #     stacked_interventions.append(target)
+        # stacked_interventions = torch.stack(stacked_interventions)
+        # img_pairs = torch.stack(b_obs.chunk(3, dim=1)).permute(1, 0, 2, 3, 4)
 
-        datasets, data_loaders, data_name = load_data_new(args, b_obs, interventions, args.env_id)
+
+        if args.causal:
+            _, data_loaders, _ = load_data_new(args, b_obs, interventions, args.env_id, seq_len=args.framestack)
+        else:
+            data_loaders = None
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
-
+        loop = 0
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             print(f"EPOCH{epoch}")
-            for x in data_loaders['train']:
-                img_pairs = x[0]
-                targets = x[1]
-                mb_inds = np.array(x[2])
             # for start in range(0, args.batch_size, args.minibatch_size):
             #     end = start + args.minibatch_size
             #     mb_inds = b_inds[start:end]
+            for i in (data_loaders['train'] if args.causal else range(0, args.batch_size, args.minibatch_size)):
+                if args.causal:
+                    img_pairs = i[0]
+                    targets = i[1]
+                    mb_inds = np.array(i[2])
+                else:
+                    end = i + args.minibatch_size
+                    mb_inds = b_inds[i:end]
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
@@ -616,9 +662,7 @@ if __name__ == "__main__":
                 if args.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
                     v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
+                        newvalue - b_values[mb_inds], -args.clip_coef, args.clip_coef,
                     )
                     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
@@ -631,43 +675,55 @@ if __name__ == "__main__":
                 if args.state_baseline:
                     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
                 elif args.causal:
-                    rec_loss, rec_obs, target_obs = agent.causal_loss(img_pairs, targets, global_step)
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
+                    rec_loss, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, global_step)
+                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss * args.causal_coef
                 else:
                     rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
                     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + rec_loss
 
-                # if args.save_img:
-                #     if epoch == 0 and start == 0:
-                #         # Save image of an original + reconstruction every policy rollout
-                #         path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
-                #
-                #         original_imgs = torch.split(target_obs[0], 3)
-                #         original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in original_imgs]
-                #         rec_imgs = torch.split(rec_obs[0], 3)
-                #
-                #         rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() for img in rec_imgs]
-                #
-                #         cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255*original_imgs[1],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[0],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[1],
-                #                                                                            cv2.COLOR_RGB2BGR))
-                #         cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss}.png", cv2.cvtColor(255*rec_imgs[2],
-                #                                                                            cv2.COLOR_RGB2BGR))
+                # profiler.disable()
+                # stats = pstats.Stats(profiler).sort_stats('tottime')
+                # stats.print_stats()
 
+                if args.save_img:
+                    if epoch == 0 and loop == 0:
+                        # Save image of an original + reconstruction every policy rollout
+                        path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+                        if not args.causal:
+                            original_imgs = torch.split(target_obs[0], 3)
+                            original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy()+0.5 for img in original_imgs]
+                            rec_imgs = torch.split(rec_obs[0], 3)
+                            rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy()+0.5 for img in rec_imgs]
+
+                            rec_loss_log = rec_loss
+                        else:
+                            original_imgs = target_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
+                            rec_imgs = rec_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
+                            rec_loss_log = logging['rec_loss']
+
+                        cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255*original_imgs[1],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        # cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
+                        #                                                                    cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[0],
+                                                                                           cv2.COLOR_RGB2BGR))
+                        # cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[1],
+                        #                                                                    cv2.COLOR_RGB2BGR))
+                        if not args.causal:
+                            cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[2],
+                                                                                           cv2.COLOR_RGB2BGR))
+
+                loop += 1
+
+                # TODO: Register a hook to prevent exploding gradients?
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
             if args.target_kl != 0.0 and approx_kl > args.target_kl:
-                print('huh?')
                 break
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
@@ -683,8 +739,15 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        if not args.state_baseline:
+        if not args.state_baseline and not args.causal:
             writer.add_scalar("losses/rec_loss", rec_loss, global_step)
+
+        if args.causal:
+            for key, value in logging.items():
+                loss_name = 'causal'
+                if key == 'rec_loss':
+                    loss_name = 'losses'
+                writer.add_scalar(f"{loss_name}/{key}", value, global_step)
 
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
@@ -694,7 +757,7 @@ if __name__ == "__main__":
         # stats.print_stats()
 
     if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
+        model_path = f"{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
 
@@ -702,10 +765,13 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
-    # TODO: Default:
-    #  - Action repeat = 2
+    # TODO: Important iCITRIS notes:
+    #  - Sequence length of 3 seems to break the system
+    #  - kl divergence keeps increasing
+    #  - Frameskip might help, but would slow down the system even more
 
-    # TODO: Important to note:
-    #   - Action is not present in the critic network as in SAC+AE,
-    #   as the action is not available in PPO (could add it in with torch.no_grad)
-    #   - Shared architecture not used, as the performance was not that good
+    # TODO: Default setups:
+    #  VAE: is_vae = true, beta = 1e-8, action_repeat = 2, framestack = 3, lr_anneal = true
+    #  AE: is_vae = false, action_repeat = 2, framestack = 3, lr_anneal = true
+    #  Causal: is_vae = true, causal = true, action_repeat = 2, framestack = 2, beta = 1.0, lr_anneal = true
+
