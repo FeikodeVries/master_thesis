@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=ppo_vae
-#SBATCH --time=08:00:00
+#SBATCH --time=00:10:00
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=defq
 #SBATCH --gres=gpu:1
-
 
 ## in the list above, the partition name depends on where you are running your job. 
 ## On DAS5 the default would be `defq` on Lisa the default would be `gpu` or `gpu_shared`
@@ -14,8 +13,10 @@
 # Load GPU drivers
 
 ## Enable the following two lines for DAS5
-module load cuda12.3/toolkit
-module load cuDNN/cuda12.3
+#module load cuda12.3/toolkit
+#module load cuDNN/cuda12.3
+module load cuda11.1/toolkit
+module load cuDNN/cuda11.1
 
 # module load cuda11.3/toolkit/11.3.1
 
@@ -29,7 +30,7 @@ cd $HOME/experiments
 
 hidden_dims=(64 128 256 512 1024)
 latent_space=(25 64 84 96 128 256 512)
-seeds=(18 53 4 72 97 10 23 35 64 88)
+seeds=(5 16 34 48 93)
 act_fns=('relu', 'tanh', 'silu')
 latent=${latent_space[SLURM_ARRAY_TASK_ID]}
 c_hid=${hidden_dims[SLURM_ARRAY_TASK_ID]}
@@ -38,9 +39,9 @@ seed=${seeds[SLURM_ARRAY_TASK_ID]}
 
 # Simple trick to create a unique directory for each run of the script
 echo $$ $seed $1
-mkdir o`echo $$`_dmc_causal_seed$seed
-cd o`echo $$`_dmc_causal_seed$seed
+mkdir o`echo $$`_dmc_ae_seed$seed
+cd o`echo $$`_dmc_ae_seed$seed
 
 # Run the actual experiment.
 export MUJOCO_GL=egl
-python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --is_vae --causal --beta 1 --framestack 2 --seed $seed
+python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed

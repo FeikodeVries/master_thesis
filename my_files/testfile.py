@@ -25,7 +25,16 @@ from torch.distributions.normal import Normal
 # env_ids = [f"dm_control/{'-'.join(item)}-v0" for item in DM_CONTROL_SUITE_ENVS]
 # env = gym.make(env_ids[0])
 # print(env_ids)
-print(1e-3)
+# print(1e-3)
+test = 1
+# stacked_interventions = []
+# for idx in range(len(interventions)):
+#     target = interventions[idx:idx + args.framestack - 1]
+#     if target.shape[0] != args.framestack - 1:
+#         target = torch.cat((target, interventions[idx][None,:]), dim=0)
+#     stacked_interventions.append(target)
+# stacked_interventions = torch.stack(stacked_interventions)
+# img_pairs = torch.stack(b_obs.chunk(3, dim=1)).permute(1, 0, 2, 3, 4)
 
 # OLD CODE: ACTOR CRITIC WITH OWN ENCODERS
 # self.actor = actor_critic.Actor(

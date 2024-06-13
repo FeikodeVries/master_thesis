@@ -14,10 +14,11 @@ OUT_DIM = {2: 39, 4: 35, 6: 31}
 
 class PixelEncoder(nn.Module):
     """Convolutional encoder of pixels observations."""
-    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32, variational=False):
+    def __init__(self, obs_shape, feature_dim, input_noise, num_layers=2, num_filters=32, variational=False):
         super().__init__()
         self.variational = variational
         self.scale_factor = nn.Parameter(torch.zeros(feature_dim, ))
+        self.input_noise = input_noise
 
         assert len(obs_shape) == 3
 
@@ -53,6 +54,10 @@ class PixelEncoder(nn.Module):
         return h
 
     def forward(self, obs, detach=False):
+        # TODO: Add noise to the observations --> then visualise
+        obs = obs + torch.randn_like(obs) * self.input_noise
+        # Ensure the noised input remains in valid range
+        obs = torch.clamp(obs, 0., 1.)
         h = self.forward_conv(obs)
 
         if detach:
@@ -173,10 +178,10 @@ _AVAILABLE_ENCODERS = {'pixel': PixelEncoder, 'identity': IdentityEncoder}
 _AVAILABLE_DECODERS = {'pixel': PixelDecoder}
 
 
-def make_encoder(encoder_type, obs_shape, feature_dim, num_layers, num_filters, variational=False):
+def make_encoder(encoder_type, obs_shape, feature_dim, input_noise, num_layers, num_filters, variational=False):
     assert encoder_type in _AVAILABLE_ENCODERS
 
-    return _AVAILABLE_ENCODERS[encoder_type](obs_shape, feature_dim, num_layers, num_filters, variational)
+    return _AVAILABLE_ENCODERS[encoder_type](obs_shape, feature_dim, input_noise, num_layers, num_filters, variational)
 
 
 def make_decoder(decoder_type, obs_shape, action_size, feature_dim, num_layers, num_filters, causal=False):

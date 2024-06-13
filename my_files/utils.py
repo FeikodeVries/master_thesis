@@ -370,7 +370,7 @@ class InstantaneousPrior(nn.Module):
             with torch.no_grad():
                 z_inp_flat_nograd = z_inp[:, :, s:].detach().flatten(0, 3)
                 # TODO: Feed automatically to simpler version? --> default is 16 (Needed to reduce VRAM usage)
-                if self.num_latents <= 50:
+                if self.num_latents <= 16:
                     preds_nograd = self.net(z_inp_flat_nograd)
                 else:
                     preds_nograd = torch.cat([self.net(z_part) for z_part in z_inp_flat_nograd.chunk(2, dim=0)], dim=0)
