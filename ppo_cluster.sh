@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ppo_vae
-#SBATCH --time=00:10:00
+#SBATCH --time=08:00:00
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=defq
@@ -13,10 +13,10 @@
 # Load GPU drivers
 
 ## Enable the following two lines for DAS5
-#module load cuda12.3/toolkit
-#module load cuDNN/cuda12.3
-module load cuda11.1/toolkit
-module load cuDNN/cuda11.1
+module load cuda12.3/toolkit
+module load cuDNN/cuda12.3
+#module load cuda11.1/toolkit
+#module load cuDNN/cuda11.1
 
 # module load cuda11.3/toolkit/11.3.1
 
@@ -30,7 +30,7 @@ cd $HOME/experiments
 
 hidden_dims=(64 128 256 512 1024)
 latent_space=(25 64 84 96 128 256 512)
-seeds=(5 16 34 48 93)
+seeds=(79 9 40 89 32)
 act_fns=('relu', 'tanh', 'silu')
 latent=${latent_space[SLURM_ARRAY_TASK_ID]}
 c_hid=${hidden_dims[SLURM_ARRAY_TASK_ID]}
@@ -43,5 +43,4 @@ mkdir o`echo $$`_dmc_ae_seed$seed
 cd o`echo $$`_dmc_ae_seed$seed
 
 # Run the actual experiment.
-export MUJOCO_GL=egl
-python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed
+MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed --num_minibatches 16

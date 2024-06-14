@@ -528,7 +528,8 @@ if __name__ == "__main__":
         trained_model = torch.load(model_path)
         agent.load_state_dict(trained_model['model_state_dict'])
         optimizer.load_state_dict(trained_model['optimizer_state_dict'])
-        optimizer_ae.load_state_dict(trained_model['optimizer_ae_state_dict'])
+        if not args.state_baseline:
+            optimizer_ae.load_state_dict(trained_model['optimizer_ae_state_dict'])
 
         # Freeze all parameters except for the PPO actor-critic networks
         params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
@@ -793,8 +794,8 @@ if __name__ == "__main__":
 
     # TODO: Default setups:
     #  State baseline: is_vae = false, action_repeat = 1, lr_anneal = true, clip_coef = 0.2
-    #  AE: is_vae = false, action_repeat = 2, framestack = 3, lr_anneal = true, clip_coef = 0.1
-    #  Causal: is_vae = true, causal = true, action_repeat = 2, framestack = 2, beta = 1.0, lr_anneal = true, clip_coef = 0.2
+    #  AE: is_vae = false, action_repeat = 2, framestack = 3, lr_anneal = true, clip_coef = 0.1, num_minibatch = 16
+    #  Causal: is_vae = true, causal = true, action_repeat = 2, framestack = 2, beta = 1.0, lr_anneal = true, clip_coef = 0.1,  num_minibatch = 16
     #  IMPORTANT:
     #  - LR_Annealing is really useful for stabilising training and improving performance
     #  - Target_kl to be set at 0.05?
