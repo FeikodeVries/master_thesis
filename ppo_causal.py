@@ -31,7 +31,7 @@ def parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__)[: -len(".py")],
                         help="""the name of this experiment""")
-    parser.add_argument('--seed', type=int, default=53,
+    parser.add_argument('--seed', type=int, default=77,
                         help="""seed of the experiment""")
     parser.add_argument('--torch_deterministic', type=bool, default=True,
                         help="""if toggled, `torch.backends.cudnn.deterministic=False`""")
@@ -67,7 +67,7 @@ def parser():
                         help="the discount factor gamma")
     parser.add_argument('--gae_lambda', type=float, default=0.95,
                         help="the lambda for the general advantage estimation")
-    parser.add_argument('--num_minibatches', type=int, default=32,
+    parser.add_argument('--num_minibatches', type=int, default=16,
                         help="the number of mini-batches (Default is 32)")
     parser.add_argument('--update_epochs', type=int, default=10,
                         help="the K epochs to update the policy")
@@ -110,8 +110,8 @@ def parser():
                         help="whether to add the action to the critic")
     parser.add_argument('--is_vae', action='store_true',
                         help="whether to use a VAE or an AE")
-    parser.add_argument('--beta', type=float, default=1e-8,
-                        help="the coefficient for the kld on the VAE loss")
+    parser.add_argument('--beta', type=float, default=1.0,
+                        help="the coefficient for the kld on the VAE loss (1.0 for causal, else 1e-8)")
     parser.add_argument('--encoder_lr', type=float, default=1e-3,
                         help="learning rate for the encoder")
     parser.add_argument('--ae_freeze', type=int, default=2,
@@ -120,9 +120,11 @@ def parser():
                         help="")
 
     # MY ARGUMENTS (Causal)
-    parser.add_argument('--causal', action='store_true',
+    parser.add_argument('--causal', action='store_false',
                         help="whether to use the causal vae to train PPO")
     parser.add_argument('--causal_coef', type=float, default=1.0)
+    parser.add_argument('--causal_hidden_dims', type=int, default=32,
+                        help='')
     parser.add_argument('--counter_lr', type=float, default=1e-3)
     parser.add_argument('--graph_lr', type=float, default=5e-4)
     parser.add_argument('--lambda_sparse', type=float, default=0.02,
@@ -223,7 +225,7 @@ class Agent(nn.Module):
             act_fn = nn.SiLU()
 
         input_dims = np.array(envs.single_observation_space.shape).prod() if args.state_baseline else args.latent_dims
-        # input_dims = input_dims if not args.causal else (args.latent_dims * np.prod(envs.single_action_space.shape))
+        input_dims = input_dims if not args.causal else (args.latent_dims * np.prod(envs.single_action_space.shape))
 
         self.critic = nn.Sequential(
             layer_init(nn.Linear(input_dims, args.hidden_dims)), act_fn,
@@ -249,14 +251,14 @@ class Agent(nn.Module):
                                         action_size=np.prod(envs.single_action_space.shape),
                                         feature_dim=args.latent_dims, num_layers=4, num_filters=32,
                                         causal=args.causal).to(device)
-
+            # TODO: Disable when loading
             self.encoder.apply(weight_init)
             self.decoder.apply(weight_init)
             self.decoder_latent_lambda = 1e-6
 
         if args.causal:
             self.prior = utils.InstantaneousPrior(num_latents=args.latent_dims,
-                                                  c_hid=args.hidden_dims,
+                                                  c_hid=args.causal_hidden_dims,
                                                   num_blocks=np.prod(envs.single_action_space.shape),
                                                   framestack=args.framestack,
                                                   shared_inputs=args.latent_dims,
@@ -268,7 +270,7 @@ class Agent(nn.Module):
             self.intv_classifier = causal.InstantaneousTargetClassifier(
                 num_latents=args.latent_dims,
                 num_blocks=np.prod(envs.single_action_space.shape),
-                c_hid=args.hidden_dims * 2,
+                c_hid=args.causal_hidden_dims * 2,
                 num_layers=1,
                 act_fn=nn.SiLU,
                 momentum_model=0.9,
@@ -278,7 +280,7 @@ class Agent(nn.Module):
             )
             self.mi_estimator = causal.MIEstimator(num_latents=args.latent_dims,
                                                    num_blocks=np.prod(envs.single_action_space.shape),
-                                                   c_hid=args.hidden_dims,
+                                                   c_hid=args.causal_hidden_dims,
                                                    momentum_model=0.9,
                                                    gumbel_temperature=1.0)
             self.mi_scheduler = utils.SineWarmupScheduler(warmup=50000,
@@ -328,8 +330,7 @@ class Agent(nn.Module):
             latent = x
             action_mean = self.actor(latent)
         elif args.causal:
-            # latent = self.causal_rep(x)
-            _, latent = self.encode_imgs(x)
+            latent = self.get_causal_rep(x)
             action_mean = self.actor(latent.detach())
         else:
             _, latent = self.encode_imgs(x)
@@ -362,25 +363,21 @@ class Agent(nn.Module):
             rec_loss = rec_loss + self.decoder_latent_lambda * latent_loss
         return rec_loss, rec_obs, target_obs
 
-    def causal_rep(self, obs):
+    def get_causal_rep(self, obs):
         z_mean, z_logstd = self.encoder(obs)
         # constrain log_std inside [log_std_min, log_std_max]
-        z_logstd = torch.tanh(z_logstd)
-        z_logstd = args.log_std_min + 0.5 * (args.log_std_max - args.log_std_min) * (z_logstd + 1)
 
         latent_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
         # Get latent assignment to causal vars
-        target_assignment = self.prior.get_target_assignment(hard=True)
+        target_assignment = self.prior.get_target_assignment(hard=False)
         # Assign latent vals to their respective causal var
         latent_causal_assignment = [target_assignment * latent_sample[i][:, None] for i in range(len(latent_sample))]
-        latent_causal_assignment = torch.flatten(latent_causal_assignment[0])[None, :]
-        # latent_causal_assignment = torch.stack(latent_causal_assignment, dim=0)
+        latent_causal_assignment = torch.flatten(torch.stack(latent_causal_assignment, dim=0), start_dim=1)
 
         return latent_causal_assignment
 
     def causal_loss(self, imgs, intervention_targets, global_step):
-        imgs = imgs.cuda()
-        target = intervention_targets.cuda()
+        target = intervention_targets
 
         # En- and decode every element
         z_mean, z_logstd = self.encoder(imgs.flatten(0, 1))
@@ -406,7 +403,6 @@ class Agent(nn.Module):
                                  matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(global_step)))
         kld = kld.unflatten(0, (imgs.shape[0], -1))
         # Calculate reconstruction loss
-        # TODO: By summing it like this, the reconstruction is much more heavily weighted in the overall loss
         rec_loss = F.mse_loss(x_rec, imgs[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
         # Combine to full loss
         loss = (kld * args.beta + rec_loss).mean()
@@ -493,7 +489,7 @@ if __name__ == "__main__":
     # Define optimizers
     if args.state_baseline:
         agent_params = agent.parameters()
-        optimizer = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
+        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
     elif args.causal:
         graph_params, counter_params, agent_params, other_params = [], [], [], []
         for name, param in agent.named_parameters():
@@ -505,8 +501,8 @@ if __name__ == "__main__":
                 agent_params.append(param)
             elif not (name.startswith('encoder') or name.startswith('decoder')):
                 other_params.append(param)
-        optimizer = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
-        optimizer_ae = optim.Adam(
+        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
+        optimizer_rep = optim.Adam(
             [{'params': graph_params, 'name':'', 'lr': args.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
              {'params': counter_params, 'name':'', 'lr': 2 * args.counter_lr, 'weight_decay': 1e-4},
              {'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6}, # Encoder params
@@ -515,11 +511,10 @@ if __name__ == "__main__":
     else:
         agent_params = [param for name, param in agent.named_parameters() if
                         name.startswith('actor') or name.startswith('critic')]
-        # TODO: Add weight decay to encoder as well
-        optimizer_ae = optim.Adam([{'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Encoder params
+        optimizer_rep = optim.Adam([{'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Encoder params
                                 {'params': agent.decoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
                                 ], lr=args.learning_rate)
-        optimizer = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
+        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
 
     # Load trained model and evaluate
     if args.eval_representation and not args.state_baseline:
@@ -527,9 +522,9 @@ if __name__ == "__main__":
         model_path = str(pathlib.Path().absolute()) + args.model_loc + str(args.seed)
         trained_model = torch.load(model_path)
         agent.load_state_dict(trained_model['model_state_dict'])
-        optimizer.load_state_dict(trained_model['optimizer_state_dict'])
+        optimizer_ppo.load_state_dict(trained_model['optimizer_state_dict'])
         if not args.state_baseline:
-            optimizer_ae.load_state_dict(trained_model['optimizer_ae_state_dict'])
+            optimizer_rep.load_state_dict(trained_model['optimizer_ae_state_dict'])
 
         # Freeze all parameters except for the PPO actor-critic networks
         params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
@@ -558,7 +553,7 @@ if __name__ == "__main__":
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+            optimizer_ppo.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
             global_step += args.num_envs
@@ -590,9 +585,8 @@ if __name__ == "__main__":
             if args.state_baseline:
                 next_value = agent.get_val(next_obs).reshape(1, -1)
             elif args.causal:
-                # latent = agent.causal_rep(next_obs)
-                _, latent = agent.encode_imgs(next_obs)
-                next_value = agent.get_val(latent).reshape(1, -1)
+                causal_rep = agent.get_causal_rep(next_obs)
+                next_value = agent.get_val(causal_rep).reshape(1, -1)
             else:
                 _, latent = agent.encode_imgs(next_obs)
                 next_value = agent.get_val(latent).reshape(1, -1)
@@ -675,16 +669,16 @@ if __name__ == "__main__":
                 entropy_loss = entropy.mean()
 
                 if args.state_baseline:
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                    loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
                 elif args.causal:
                     if loop % args.ae_freeze == 0 and not args.eval_representation:
-                        rec_loss, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, global_step)
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                        loss_representation, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, global_step)
+                    loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
                 else:
                     # Freeze autoencoder update to allow PPO to adapt to the representations
                     if loop % args.ae_freeze == 0 and not args.eval_representation:
-                        rec_loss, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
-                    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                        loss_representation, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
+                    loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
                 # profiler.disable()
                 # stats = pstats.Stats(profiler).sort_stats('tottime')
@@ -700,11 +694,11 @@ if __name__ == "__main__":
                             rec_imgs = torch.split(rec_obs[0], 3)
                             rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy()+0.5 for img in rec_imgs]
 
-                            rec_loss_log = rec_loss
+                            rec_loss_log = loss_representation
                         else:
                             original_imgs = target_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
                             rec_imgs = rec_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
-                            rec_loss_log = logging['rec_loss']
+                            rec_loss_log = logging['representation_loss']
 
                         cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
                                                                                            cv2.COLOR_RGB2BGR))
@@ -721,17 +715,17 @@ if __name__ == "__main__":
                                                                                            cv2.COLOR_RGB2BGR))
 
                 # TODO: Register a hook to prevent exploding gradients?
-                optimizer.zero_grad()
-                loss.backward()
+                optimizer_ppo.zero_grad()
+                loss_ppo.backward()
                 nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
-                optimizer.step()
+                optimizer_ppo.step()
 
                 if loop % args.ae_freeze == 0 and not args.state_baseline and not args.eval_representation:
                     non_agent_params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
-                    optimizer_ae.zero_grad()
-                    rec_loss.backward()
+                    optimizer_rep.zero_grad()
+                    loss_representation.backward()
                     nn.utils.clip_grad_norm_(non_agent_params, args.max_grad_norm)
-                    optimizer_ae.step()
+                    optimizer_rep.step()
 
                 loop += 1
 
@@ -743,7 +737,7 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar("charts/learning_rate", optimizer_ppo.param_groups[0]["lr"], global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -752,13 +746,11 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         if not args.state_baseline and not args.causal:
-            writer.add_scalar("losses/rec_loss", rec_loss, global_step)
+            writer.add_scalar("losses/representation_loss", loss_representation, global_step)
 
         if args.causal:
             for key, value in logging.items():
                 loss_name = 'causal'
-                if key == 'rec_loss':
-                    loss_name = 'losses'
                 writer.add_scalar(f"{loss_name}/{key}", value, global_step)
 
         print("SPS:", int(global_step / (time.time() - start_time)))
@@ -770,9 +762,13 @@ if __name__ == "__main__":
 
     if args.save_model:
         model_path = f"{run_name}/{args.exp_name}.cleanrl_model"
-        torch.save({'model_state_dict': agent.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'optimizer_ae_state_dict': optimizer_ae.state_dict()}, model_path)
+        if args.state_baseline:
+            torch.save({'model_state_dict': agent.state_dict(),
+                        'optimizer_state_dict': optimizer_ppo.state_dict()}, model_path)
+        else:
+            torch.save({'model_state_dict': agent.state_dict(),
+                        'optimizer_state_dict': optimizer_ppo.state_dict(),
+                        'optimizer_ae_state_dict': optimizer_rep.state_dict()}, model_path)
         # torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
 
@@ -784,13 +780,16 @@ if __name__ == "__main__":
     #  - Sequence length of 3 seems to break the system
     #  - kl divergence keeps increasing
     #  - Frameskip might help, but would slow down the system even more
+    #  - CUDA out of memory problem --> didn't have this before?:
+    #       - Decrease batch size (128 requires 150Gb, 64 requires 75Gb)
+    #           - Works locally if set to 32
+    #       - Separate the Actor-critic hidden dimensions and that of the causal system
 
     # TODO: AE has a lot of potential --> very low rec_loss, but performance just diminishes at a point?
     #       - Add noise to the input to make the AE more robust
     #       - Freeze the AE update for n epochs to allow the PPO to adapt to the new representation (also separate optimisers and losses for encoder and PPO)
     #           --> Helps stabilise the system
     #       - Increase the number of hidden dimensions to prevent catastrophic forgetting
-
 
     # TODO: Default setups:
     #  State baseline: is_vae = false, action_repeat = 1, lr_anneal = true, clip_coef = 0.2
