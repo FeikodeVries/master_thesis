@@ -26,7 +26,20 @@ from torch.distributions.normal import Normal
 # env = gym.make(env_ids[0])
 # print(env_ids)
 # print(1e-3)
-test = 1
+# import numpy as np
+# from skimage.util.shape import view_as_windows
+#
+# dropout_prob = 0.5
+# sample = np.random.uniform(low=-1, high=1, size=100)
+# mask = np.random.choice([0, 1], 100, p=[dropout_prob, 1-dropout_prob])
+# masked_sample = np.multiply(sample, mask)
+# intervened_sample = np.where(masked_sample==0, np.random.choice([-1, 1], 100), masked_sample)
+# test = 1
+import torch
+
+test = torch.Tensor([1])
+test.exp()
+
 # stacked_interventions = []
 # for idx in range(len(interventions)):
 #     target = interventions[idx:idx + args.framestack - 1]

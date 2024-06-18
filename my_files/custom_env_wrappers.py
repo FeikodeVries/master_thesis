@@ -135,6 +135,7 @@ class NormObsSize(gym.Wrapper):
         obs = obs / 255.
         return obs, reward, termination, truncation, info
 
+
 class FrameSkip(gym.Wrapper):
     def __init__(self, env, frameskip=1):
         gym.Wrapper.__init__(self, env)

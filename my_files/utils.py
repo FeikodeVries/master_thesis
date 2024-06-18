@@ -369,7 +369,6 @@ class InstantaneousPrior(nn.Module):
             preds = preds.unflatten(0, (batch_size, num_z_samples, s, self.num_blocks))
             with torch.no_grad():
                 z_inp_flat_nograd = z_inp[:, :, s:].detach().flatten(0, 3)
-                # TODO: Feed automatically to simpler version? --> default is 16 (Needed to reduce VRAM usage)
                 if self.num_latents <= 16:
                     preds_nograd = self.net(z_inp_flat_nograd)
                 else:
@@ -461,31 +460,6 @@ class InstantaneousPrior(nn.Module):
 
         return kld_vae
 
-    def logging(self, logger):
-        if self.graph_learning_method == 'ENCO':
-            for i in range(self.enco_theta.shape[0]):
-                for j in range(self.enco_theta.shape[1]):
-                    if i == j:
-                        continue
-                    logger.log(f'enco_theta_{i}_to_{j}', self.enco_theta[i, j], on_step=False, on_epoch=True)
-                    logger.log(f'enco_gamma_{i}_to_{j}', self.enco_gamma[i, j], on_step=False, on_epoch=True)
-                    if self.enco_theta.grad is not None:
-                        logger.log(f'enco_theta_{i}_to_{j}_grads', self.enco_theta.grad[i, j], on_step=False,
-                                   on_epoch=True)
-                    if self.enco_gamma.grad is not None:
-                        logger.log(f'enco_gamma_{i}_to_{j}_grads', self.enco_gamma.grad[i, j], on_step=False,
-                                   on_epoch=True)
-        elif self.graph_learning_method == 'NOTEARS':
-            for i in range(self.notears_params.shape[0]):
-                for j in range(self.notears_params.shape[1]):
-                    if i == j:
-                        continue
-                    logger.log(f'notears_{i}_to_{j}', self.notears_params[i, j], on_step=False, on_epoch=True)
-        soft_adj = self.get_adj_matrix(hard=False)
-        logger.log('matrix_exponential', torch.trace(torch.matrix_exp(soft_adj)))
-        max_grad = (soft_adj * (1 - soft_adj)).max()
-        logger.log('adj_matrix_max_grad', max_grad)
-
     def check_trainability(self):
         soft_adj = self.get_adj_matrix(hard=False)
         max_grad = (soft_adj * (1 - soft_adj)).max().item()
@@ -537,32 +511,6 @@ def get_act_fn(act_fn_name):
     return act_fn_func
 
 
-def get_default_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default="../data/")
-    parser.add_argument('--causal_encoder_checkpoint', type=str,
-                        default="../data/model_checkpoints/active_iCITRIS/CausalEncoder.ckpt")
-    parser.add_argument('--cluster', action="store_true")
-    parser.add_argument('--seed', type=int, default=3)
-    parser.add_argument('--max_epochs', type=int, default=5)
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--offline', action='store_true')
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument('--exclude_vars', type=str, nargs='+', default=None)
-    parser.add_argument('--exclude_objects', type=int, nargs='+', default=None)
-    parser.add_argument('--coarse_vars', action='store_true')
-    parser.add_argument('--data_img_width', type=int, default=-1)
-    parser.add_argument('--seq_len', type=int, default=3)
-    parser.add_argument('--lr', type=float, default=1e-3)  # TODO: Tune for better results --> Default: 1e-3
-    parser.add_argument('--warmup', type=int, default=100)
-    parser.add_argument('--imperfect_interventions', action='store_true')
-    parser.add_argument('--check_val_every_n_epoch', type=int, default=-1)
-    parser.add_argument('--logger_name', type=str, default='')
-    parser.add_argument('--files_to_save', type=str, nargs='+', default='')
-    return parser
-
-
 def update_enco_params(self, *args, **kwargs):
     if self.gamma_grads is not None:
         self.enco_gamma.grad = self.gamma_grads.detach()
@@ -605,7 +553,6 @@ def gaussian_log_prob(mean, log_std, samples):
 
 
 def mask_actions(actions, dropout_prob=0.1):
-    # Decrease probability of masking out over training
     # Mask actions
     mask = np.random.choice([0, 1], actions.shape, p=[dropout_prob, 1-dropout_prob])
     guaranteed_action = random.randint(0, actions.shape[1]-1)
@@ -613,17 +560,14 @@ def mask_actions(actions, dropout_prob=0.1):
     mask[0][guaranteed_action] = 1
     if isinstance(actions, np.ndarray):
         masked_actions = np.multiply(actions, mask)
-        return masked_actions
+        masked_actions = np.where(masked_actions==0, np.random.choice([-1, 1], actions.shape), masked_actions)
+        return masked_actions, mask
     else:
         mask = torch.from_numpy(mask).to(device="cuda:0")
         actions = actions * mask
-        return actions
+        # Max and min. can be 1 and -1 as DMC internally clips the action values
+        fill = torch.randint(low=0, high=2, size=actions.shape).to(device="cuda:0")
+        fill = torch.flatten(torch.where(fill==0, -1, fill))
+        actions = torch.where(actions==0, fill, actions)
 
-
-def soft_update_params(net, target_net, tau):
-    for param, target_param in zip(net.parameters(), target_net.parameters()):
-        target_param.data.copy_(
-            tau * param.data + (1 - tau) * target_param.data
-        )
-
-
+        return actions, mask

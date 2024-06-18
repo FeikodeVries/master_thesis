@@ -70,6 +70,7 @@ class TargetClassifier(nn.Module):
         self.classifiers = nn.Sequential(*layers)
         self.classifiers[-1].weight.data.fill_(0.0)
         self.exp_classifiers = deepcopy(self.classifiers)
+        # TODO: Enable gradients to learn target classifier
         for p in self.exp_classifiers.parameters():
             p.requires_grad_(False)
 
@@ -103,7 +104,6 @@ class TargetClassifier(nn.Module):
             self.avg_dist.mul_(self.dist_steps / (self.dist_steps + 1)).add_(new_dist * (1. / (self.dist_steps + 1)))
 
             if hasattr(self, 'avg_cond_dist'):
-                # TODO: Rescale target sums so that the value is within a reasonable range
                 sum_scale = target.shape[0] * target.shape[1]
                 target_sums = target.sum(dim=[0, 1]) / sum_scale
                 # target_sums = target

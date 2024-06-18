@@ -14,7 +14,7 @@ OUT_DIM = {2: 39, 4: 35, 6: 31}
 
 class PixelEncoder(nn.Module):
     """Convolutional encoder of pixels observations."""
-    def __init__(self, obs_shape, feature_dim, input_noise, num_layers=2, num_filters=32, variational=False):
+    def __init__(self, obs_shape, feature_dim, input_noise, num_layers=2, num_filters=32, variational=False, curl=False):
         super().__init__()
         self.variational = variational
         self.scale_factor = nn.Parameter(torch.zeros(feature_dim, ))
@@ -24,7 +24,11 @@ class PixelEncoder(nn.Module):
 
         self.feature_dim = feature_dim
         self.num_layers = num_layers
-        self.convs = nn.ModuleList([nn.Conv2d(obs_shape[0], num_filters, 3, stride=2)])
+
+        self.convs = nn.ModuleList(
+            [nn.Conv2d(obs_shape[0], num_filters, 3, stride=2)]
+        )
+
         for i in range(num_layers - 1):
             self.convs.append(nn.Conv2d(num_filters, num_filters, 3, stride=1))
 
@@ -34,6 +38,8 @@ class PixelEncoder(nn.Module):
         self.ln = nn.LayerNorm(self.feature_dim)
 
         self.outputs = dict()
+        self.output_logits = curl
+
 
     def reparameterize(self, mu, logstd):
         std = torch.exp(logstd)
@@ -54,7 +60,6 @@ class PixelEncoder(nn.Module):
         return h
 
     def forward(self, obs, detach=False):
-        # TODO: Add noise to the observations --> then visualise
         obs = obs + torch.randn_like(obs) * self.input_noise
         # Ensure the noised input remains in valid range
         obs = torch.clamp(obs, 0., 1.)
@@ -65,9 +70,7 @@ class PixelEncoder(nn.Module):
 
         h_fc = self.fc(h)
         self.outputs['fc'] = h_fc
-        # TODO: Should this last layernorm be done for a vae?
-        # h_norm = self.ln(h_fc)
-        # self.outputs['ln'] = h_norm
+
         if self.variational:
             mean, log_std = h_fc.chunk(2, dim=-1)
             s = F.softplus(self.scale_factor)
@@ -77,8 +80,11 @@ class PixelEncoder(nn.Module):
             h_norm = self.ln(h_fc)
             self.outputs['ln'] = h_norm
 
-            out = torch.tanh(h_norm)
-            self.outputs['tanh'] = out
+            if self.output_logits:
+                out = h_norm
+            else:
+                out = torch.tanh(h_norm)
+                self.outputs['tanh'] = out
 
             return out
 
@@ -87,20 +93,6 @@ class PixelEncoder(nn.Module):
         # only tie conv layers
         for i in range(self.num_layers):
             tie_weights(src=source.convs[i], trg=self.convs[i])
-
-    def log(self, L, step, log_freq):
-        if step % log_freq != 0:
-            return
-
-        for k, v in self.outputs.items():
-            L.log_histogram('train_encoder/%s_hist' % k, v, step)
-            if len(v.shape) > 2:
-                L.log_image('train_encoder/%s_img' % k, v[0], step)
-
-        for i in range(self.num_layers):
-            L.log_param('train_encoder/conv%s' % (i + 1), self.convs[i], step)
-        L.log_param('train_encoder/fc', self.fc, step)
-        L.log_param('train_encoder/ln', self.ln, step)
 
 
 class IdentityEncoder(nn.Module):
@@ -178,10 +170,10 @@ _AVAILABLE_ENCODERS = {'pixel': PixelEncoder, 'identity': IdentityEncoder}
 _AVAILABLE_DECODERS = {'pixel': PixelDecoder}
 
 
-def make_encoder(encoder_type, obs_shape, feature_dim, input_noise, num_layers, num_filters, variational=False):
+def make_encoder(encoder_type, obs_shape, feature_dim, input_noise, num_layers, num_filters, variational=False, curl=False):
     assert encoder_type in _AVAILABLE_ENCODERS
 
-    return _AVAILABLE_ENCODERS[encoder_type](obs_shape, feature_dim, input_noise, num_layers, num_filters, variational)
+    return _AVAILABLE_ENCODERS[encoder_type](obs_shape, feature_dim, input_noise, num_layers, num_filters, variational, curl)
 
 
 def make_decoder(decoder_type, obs_shape, action_size, feature_dim, num_layers, num_filters, causal=False):

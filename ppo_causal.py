@@ -25,6 +25,7 @@ from my_files.encoder_decoder import make_encoder, make_decoder
 from my_files import utils
 from my_files import causal_disentanglement as causal
 from my_files.datahandling import load_data_new
+import my_files.CURL as curl
 
 
 def parser():
@@ -83,8 +84,8 @@ def parser():
                         help="coefficient of the value function")
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help="the maximum norm for the gradient clipping")
-    parser.add_argument('--target_kl', type=float, default=0.05,
-                        help="the target KL divergence threshold")
+    parser.add_argument('--target_kl', type=float, default=0.0,
+                        help="the target KL divergence threshold --> used 0.05 previously")
 
     # MY ARGUMENTS (Base system)
     parser.add_argument('--eval_representation', action='store_true',)
@@ -114,7 +115,7 @@ def parser():
                         help="the coefficient for the kld on the VAE loss (1.0 for causal, else 1e-8)")
     parser.add_argument('--encoder_lr', type=float, default=1e-3,
                         help="learning rate for the encoder")
-    parser.add_argument('--ae_freeze', type=int, default=2,
+    parser.add_argument('--ae_freeze', type=int, default=1,
                         help="")
     parser.add_argument('--encoderinput_noise', type=float, default=0.05,
                         help="")
@@ -139,12 +140,25 @@ def parser():
                         help='')
     parser.add_argument('--log_std_max', type=int, default=2,
                         help='')
-    parser.add_argument('--beta_classifier', type=float, default=2.0,
-                        help='Default is 2.0')
+    parser.add_argument('--beta_classifier', type=float, default=4.0,
+                        help='In iCITRIS this value is 4 for the causal pinball set')
     parser.add_argument('--beta_mi_estimator', type=float, default=2.0,
                         help='Default is 2.0')
     parser.add_argument('--warmup', type=int, default=100,
                         help='')
+
+    # MY ARGUMENTS (CURL)
+    parser.add_argument('--curl', action='store_true',
+                        help='')
+    parser.add_argument('--curl_latent_dims', type=int, default=128,
+                        help='')
+    parser.add_argument('--pre_transform_img_size', type=int, default=100,
+                        help='')
+    parser.add_argument('--curl_encoder_update_freq', type=int, default=4,
+                        help='')
+    parser.add_argument('--encoder_tau', type=float, default=0.005,
+                        help='')
+
     # MAKE AT RUNTIME
     parser.add_argument('--experiment_name', type=str, default='default',
                         help="name of the experiment")
@@ -156,6 +170,8 @@ def parser():
                         help="the number of iterations (computed in runtime)")
 
     return parser.parse_args()
+
+# TODO: CURL --> Critic target encoder
 
 
 def make_env(env_id):
@@ -176,7 +192,7 @@ def make_env(env_id):
 
             # Stack the frames in a rolling manner
             env = gym.wrappers.AddRenderObservation(env, render_only=True)
-            env = mywrapper.ResizeObservation(env, shape=args.img_size)
+            env = mywrapper.ResizeObservation(env, shape=(args.img_size if not args.curl else args.pre_transform_img_size))
             env = mywrapper.FrameSkip(env, frameskip=args.action_repeat)
             if not args.causal:
                 env = mywrapper.FrameStack(env, k=args.framestack)
@@ -245,7 +261,7 @@ class Agent(nn.Module):
             self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
                                         feature_dim=args.latent_dims, input_noise=args.encoderinput_noise,
                                         num_layers=4, num_filters=32,
-                                        variational=args.is_vae).to(device)
+                                        variational=args.is_vae, curl=True if args.curl else False).to(device)
 
             self.decoder = make_decoder(decoder_type='pixel', obs_shape=envs.single_observation_space.shape,
                                         action_size=np.prod(envs.single_action_space.shape),
@@ -296,6 +312,16 @@ class Agent(nn.Module):
             self.all_v_dicts = []
             self.prior_t1 = self.prior
 
+        if args.curl:
+            self.encoder_target = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
+                                               feature_dim=args.latent_dims, input_noise=args.encoderinput_noise,
+                                               num_layers=4, num_filters=32,
+                                               variational=args.is_vae, curl=True).to(device)
+            self.encoder_target.load_state_dict(self.encoder.state_dict())
+            self.CURL = curl.CURL(args.latent_dims, args.curl_latent_dims, self.encoder, self.encoder_target,
+                                  output_type='continuous').to(device)
+            self.cross_entropy_loss = nn.CrossEntropyLoss()
+
         self.train()
 
     def train(self, training=True):
@@ -308,6 +334,9 @@ class Agent(nn.Module):
             self.prior.train(training)
             self.intv_classifier.train(training)
             self.mi_estimator.train(training)
+        if args.curl:
+            self.CURL.train(training)
+            self.encoder_target.train(training)
 
     def get_val(self, obs):
         return self.critic(obs)
@@ -332,17 +361,23 @@ class Agent(nn.Module):
         elif args.causal:
             latent = self.get_causal_rep(x)
             action_mean = self.actor(latent.detach())
+        elif args.curl:
+            # Crop center of image
+            x = curl.center_crop_image(x, args.img_size)
+            _, latent = self.encode_imgs(x)
+            action_mean = self.actor(latent.detach())
         else:
             _, latent = self.encode_imgs(x)
             action_mean = self.actor(latent.detach())
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
+        intervention = torch.empty(envs.single_action_space.shape)
         if action is None:
             action = probs.sample()
             if args.causal:
-                action = utils.mask_actions(action, dropout_prob=args.action_dropout)
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_val(latent)
+                action, intervention = utils.mask_actions(action, dropout_prob=args.action_dropout)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_val(latent), intervention
 
     def rec_loss(self, obs, target_obs):
         kld, latent = self.encode_imgs(obs)
@@ -432,6 +467,16 @@ class Agent(nn.Module):
 
         return loss, x_rec, imgs, logging
 
+    def curl_loss(self, obs_anchor, obs_pos):
+        z_a = self.CURL.encode(obs_anchor)
+        z_pos = self.CURL.encode(obs_pos, ema=True)
+
+        logits = self.CURL.compute_logits(z_a, z_pos)
+        labels = torch.arange(logits.shape[0]).long().to(device)
+        curl_loss = self.cross_entropy_loss(logits, labels)
+
+        return curl_loss
+
 
 if __name__ == "__main__":
     args = parser()
@@ -454,7 +499,12 @@ if __name__ == "__main__":
         args.is_vae = True
         args.state_baseline = False
 
-    args.experiment_name = f'runs/{args.env_id}_fromstate{args.state_baseline}_isCausal{args.causal}_isVAE{args.is_vae}_chid{args.hidden_dims}_stack{args.framestack}_seed{args.seed}'
+    if args.curl:
+        args.causal = False
+        args.is_vae = False
+        args.state_baseline = False
+
+    args.experiment_name = f'runs/{args.env_id}_fromstate{args.state_baseline}_isCausal{args.causal}_causalhid{args.causal_hidden_dims}_isCurl{args.curl}_stack{args.framestack}_targetkl{args.target_kl}_logprobValClip_maxactionintervention_learningdisabledTargetclassifier_32causalhidden_seed{args.seed}'
     run_name = f"{args.experiment_name}"
 
     if args.track:
@@ -490,6 +540,14 @@ if __name__ == "__main__":
     if args.state_baseline:
         agent_params = agent.parameters()
         optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
+    elif args.curl:
+        agent_params = [param for name, param in agent.named_parameters() if
+                        name.startswith('actor') or name.startswith('critic')]
+        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
+        curl_params = [param for name, param in agent.CURL.named_parameters() if not name.startswith('encoder')]
+        optimizer_rep = optim.Adam(
+            [{'params': curl_params},
+             {'params': agent.encoder.parameters(), 'weight_decay': 1e-6}], lr=args.encoder_lr)
     elif args.causal:
         graph_params, counter_params, agent_params, other_params = [], [], [], []
         for name, param in agent.named_parameters():
@@ -503,17 +561,17 @@ if __name__ == "__main__":
                 other_params.append(param)
         optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
         optimizer_rep = optim.Adam(
-            [{'params': graph_params, 'name':'', 'lr': args.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
-             {'params': counter_params, 'name':'', 'lr': 2 * args.counter_lr, 'weight_decay': 1e-4},
-             {'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6}, # Encoder params
-             {'params': agent.decoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},
-             {'params': other_params, 'name':'', 'lr': args.counter_lr, 'weight_decay': 0.0}], lr=args.learning_rate)
+            [{'params': graph_params, 'lr': args.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
+             {'params': counter_params, 'lr': 2 * args.counter_lr, 'weight_decay': 1e-4},
+             {'params': agent.encoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
+             {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
+             {'params': other_params, 'lr': args.counter_lr, 'weight_decay': 0.0}], lr=args.learning_rate)
     else:
         agent_params = [param for name, param in agent.named_parameters() if
                         name.startswith('actor') or name.startswith('critic')]
-        optimizer_rep = optim.Adam([{'params': agent.encoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Encoder params
-                                {'params': agent.decoder.parameters(), 'name': '', 'lr': args.encoder_lr, 'weight_decay': 1e-6},  # Decoder params
-                                ], lr=args.learning_rate)
+        optimizer_rep = optim.Adam([{'params': agent.encoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
+                                    {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
+                                    ], lr=args.learning_rate)
         optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
 
     # Load trained model and evaluate
@@ -534,6 +592,8 @@ if __name__ == "__main__":
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    interventions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -562,10 +622,11 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(x=next_obs)
+                action, logprob, _, value, intervention = agent.get_action_and_value(x=next_obs)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
+            interventions[step] = intervention
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
@@ -587,6 +648,10 @@ if __name__ == "__main__":
             elif args.causal:
                 causal_rep = agent.get_causal_rep(next_obs)
                 next_value = agent.get_val(causal_rep).reshape(1, -1)
+            elif args.curl:
+                bootstrap_obs = curl.center_crop_image(next_obs, args.img_size)
+                _, latent = agent.encode_imgs(bootstrap_obs)
+                next_value = agent.get_val(latent).reshape(1, -1)
             else:
                 _, latent = agent.encode_imgs(next_obs)
                 next_value = agent.get_val(latent).reshape(1, -1)
@@ -611,10 +676,16 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        interventions = torch.where(b_actions != 0, 0.0, 1.0)
+        b_interventions = interventions.reshape((-1,) + envs.single_action_space.shape)
+        b_interventions = torch.abs(b_interventions - 1)
+
+        if args.curl:
+            pos = torch.clone(b_obs)
+            obs_anchor = curl.random_crop(b_obs, args.img_size)
+            obs_pos = curl.random_crop(pos, args.img_size)
 
         if args.causal:
-            _, data_loaders, _ = load_data_new(args, b_obs, interventions, args.env_id, seq_len=args.framestack)
+            _, data_loaders, _ = load_data_new(args, b_obs, b_interventions, args.env_id, seq_len=args.framestack)
         else:
             data_loaders = None
 
@@ -624,7 +695,7 @@ if __name__ == "__main__":
         loop = 0
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
-            print(f"EPOCH{epoch}")
+            print(f"EPOCH {epoch}")
             for i in (data_loaders['train'] if args.causal else range(0, args.batch_size, args.minibatch_size)):
                 if args.causal:
                     img_pairs = i[0]
@@ -634,8 +705,14 @@ if __name__ == "__main__":
                     end = i + args.minibatch_size
                     mb_inds = b_inds[i:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+
                 logratio = newlogprob - b_logprobs[mb_inds]
+
+                # Clamp logratio to range
+                logratio = torch.min(logratio, logratio.new_full(logratio.size(), 1))
+                logratio = torch.max(logratio, logratio.new_full(logratio.size(), -1))
+
                 ratio = logratio.exp()
 
                 with torch.no_grad():
@@ -668,21 +745,19 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
 
-                if args.state_baseline:
-                    loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-                elif args.causal:
-                    if loop % args.ae_freeze == 0 and not args.eval_representation:
+                # Calculate representation loss
+                # Freeze autoencoder update to allow PPO to adapt to the representations
+                if loop % args.ae_freeze == 0 and not args.eval_representation:
+                    if args.causal:
                         loss_representation, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, global_step)
-                    loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-                else:
-                    # Freeze autoencoder update to allow PPO to adapt to the representations
-                    if loop % args.ae_freeze == 0 and not args.eval_representation:
+                    elif args.curl:
+                        loss_representation = agent.curl_loss(obs_anchor[mb_inds], obs_pos[mb_inds])
+                        if loop % args.curl_encoder_update_freq == 0:
+                            curl.soft_update_params(agent.encoder, agent.encoder_target, args.encoder_tau)
+                    elif not args.state_baseline:
                         loss_representation, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
-                    loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-                # profiler.disable()
-                # stats = pstats.Stats(profiler).sort_stats('tottime')
-                # stats.print_stats()
+                loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
                 if args.save_img:
                     if epoch == 0 and loop == 0:
@@ -714,7 +789,6 @@ if __name__ == "__main__":
                             cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[2],
                                                                                            cv2.COLOR_RGB2BGR))
 
-                # TODO: Register a hook to prevent exploding gradients?
                 optimizer_ppo.zero_grad()
                 loss_ppo.backward()
                 nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
@@ -776,8 +850,8 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
+
     # TODO: Important iCITRIS notes:
-    #  - Sequence length of 3 seems to break the system
     #  - kl divergence keeps increasing
     #  - Frameskip might help, but would slow down the system even more
     #  - CUDA out of memory problem --> didn't have this before?:
@@ -799,3 +873,12 @@ if __name__ == "__main__":
     #  - LR_Annealing is really useful for stabilising training and improving performance
     #  - Target_kl to be set at 0.05?
 
+    # TODO CAUSAL FIX --> CLIP APPROX_KL --> ENABLE LEARNING FOR TARGET CLASSIFIER -->:
+    # def kl_divergence(mu_1, var_1, mu_2, var_2, dim=1):
+    #     p = td.Independent(td.Normal(mu_1, torch.sqrt(var_1)), dim)
+    #     q = td.Independent(td.Normal(mu_2, torch.sqrt(var_2)), dim)
+    #     div = td.kl_divergence(p, q)
+    #     div = torch.max(div, div.new_full(div.size(), 3))
+    #     return torch.mean(div)
+
+    # div = torch.max(div, div.new_full(div.size(), 3))
