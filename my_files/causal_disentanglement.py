@@ -70,7 +70,6 @@ class TargetClassifier(nn.Module):
         self.classifiers = nn.Sequential(*layers)
         self.classifiers[-1].weight.data.fill_(0.0)
         self.exp_classifiers = deepcopy(self.classifiers)
-        # TODO: Enable gradients to learn target classifier
         for p in self.exp_classifiers.parameters():
             p.requires_grad_(False)
 

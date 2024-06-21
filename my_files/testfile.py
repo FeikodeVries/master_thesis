@@ -40,6 +40,35 @@ import torch
 test = torch.Tensor([1])
 test.exp()
 
+# if args.save_img:
+#     if epoch == 0 and loop == 0:
+#         # Save image of an original + reconstruction every policy rollout
+#         path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
+#         if not args.causal:
+#             original_imgs = torch.split(target_obs[0], 3)
+#             original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() + 0.5 for img in original_imgs]
+#             rec_imgs = torch.split(rec_obs[0], 3)
+#             rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy() + 0.5 for img in rec_imgs]
+#
+#             rec_loss_log = loss_representation
+#         else:
+#             original_imgs = target_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
+#             rec_imgs = rec_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
+#             rec_loss_log = logging['representation_loss']
+#
+#         cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255 * original_imgs[0],
+#                                                                            cv2.COLOR_RGB2BGR))
+#         cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255 * original_imgs[1],
+#                                                                            cv2.COLOR_RGB2BGR))
+#         # cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
+#         #                                                                    cv2.COLOR_RGB2BGR))
+#         cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss_log}.png", cv2.cvtColor(255 * rec_imgs[0],
+#                                                                                         cv2.COLOR_RGB2BGR))
+#         # cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[1],
+#         #                                                                    cv2.COLOR_RGB2BGR))
+#         if not args.causal:
+#             cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss_log}.png", cv2.cvtColor(255 * rec_imgs[2],
+#                                                                                             cv2.COLOR_RGB2BGR))
 # stacked_interventions = []
 # for idx in range(len(interventions)):
 #     target = interventions[idx:idx + args.framestack - 1]

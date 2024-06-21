@@ -15,10 +15,6 @@
 ## Enable the following two lines for DAS5
 module load cuda12.3/toolkit
 module load cuDNN/cuda12.3
-#module load cuda11.1/toolkit
-#module load cuDNN/cuda11.1
-
-# module load cuda11.3/toolkit/11.3.1
 
 # This loads the anaconda virtual environment with our packages
 source $HOME/.bashrc
@@ -28,19 +24,20 @@ conda activate
 # mkdir $HOME/experiments
 cd $HOME/experiments
 
-hidden_dims=(64 128 256 512 1024)
-latent_space=(25 64 84 96 128 256 512)
-seeds=(45 37 7)
-act_fns=('relu', 'tanh', 'silu')
-latent=${latent_space[SLURM_ARRAY_TASK_ID]}
-c_hid=${hidden_dims[SLURM_ARRAY_TASK_ID]}
-act_fn=${act_fns[SLURM_ARRAY_TASK_ID]}
+ae_walker_walk_seeds=(12 50 83 95 99)
+curl_walker_walk_seeds=(2 5 46 60 84)
+causal_walker_walk_seeds=(0 0 0 0 0)
+seeds=(9 43 55 29)
+
 seed=${seeds[SLURM_ARRAY_TASK_ID]}
+ae_eval_seed=${ae_walker_walk_seeds[SLURM_ARRAY_TASK_ID]}
+curl_eval_seed=${curl_walker_walk_seeds[SLURM_ARRAY_TASK_ID]}
+causal_eval_seed=${causal_walker_walk_seeds[SLURM_ARRAY_TASK_ID]}
 
 # Simple trick to create a unique directory for each run of the script
 echo $$ $seed $1
-mkdir o`echo $$`_dmc_ae_walk_nofreeze_seed$seed
-cd o`echo $$`_dmc_ae_walk_nofreeze_seed$seed
+mkdir o`echo $$`_dmc_pixel_stand_$seed
+cd o`echo $$`_dmc_pixel_stand_$seed
 
 # Run the actual experiment.
-MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed --curl --ae_freeze 2 --curl_encoder_update_freq 4
+MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $seed --env_id "dm_control/walker-stand-v0" --pixel_baseline

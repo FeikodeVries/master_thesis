@@ -4,10 +4,7 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 import numpy as np
 from collections import defaultdict
 # Path to your TensorBoard logs directory
-logdir = 'baselines/tests/no_freeze_ae'
-
-# TODO: Adapt the scaling to action repeat for episodic return (logged 2x as often as without)
-#
+logdir = 'baselines/curl_baselines/from_scratch/stand'
 
 new_min = 0
 new_max = 1000000
@@ -23,7 +20,7 @@ def rescale_steps(scalars):
 # Function to read and log TensorBoard data to WandB
 def log_tensorboard_to_wandb(logdir):
     for subdir in os.listdir(logdir):
-        run = wandb.init(project="PPO_Causal", name=subdir, sync_tensorboard=True, group='ae_walk_nofreeze')
+        run = wandb.init(project="PPO_Causal", name=subdir, sync_tensorboard=True, group='curl_stand_baseline')
         subdir_path = os.path.join(logdir, subdir)
         summary_iterators = [EventAccumulator(os.path.join(subdir_path, dname)).Reload() for dname in os.listdir(subdir_path)]
         scalar_data = {}

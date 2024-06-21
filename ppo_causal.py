@@ -22,7 +22,9 @@ from collections import defaultdict
 
 from my_files import custom_env_wrappers as mywrapper
 from my_files.encoder_decoder import make_encoder, make_decoder
-from my_files import utils
+from my_files import causal_utils
+from my_files import shared_utils
+from my_files.shared_utils import layer_init, weight_init
 from my_files import causal_disentanglement as causal
 from my_files.datahandling import load_data_new
 import my_files.CURL as curl
@@ -32,7 +34,7 @@ def parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__)[: -len(".py")],
                         help="""the name of this experiment""")
-    parser.add_argument('--seed', type=int, default=77,
+    parser.add_argument('--seed', type=int, default=78,
                         help="""seed of the experiment""")
     parser.add_argument('--torch_deterministic', type=bool, default=True,
                         help="""if toggled, `torch.backends.cudnn.deterministic=False`""")
@@ -52,7 +54,7 @@ def parser():
                         help="whether to upload the saved model to huggingface")
     parser.add_argument('--hf_entity', type=str, default="",
                         help="the user or org name of the model repository from the Hugging Face Hub")
-    parser.add_argument('--env_id', type=str, default="dm_control/walker-walk-v0",
+    parser.add_argument('--env_id', type=str, default="dm_control/walker-stand-v0",
                         help="the id of the environment")
     parser.add_argument('--total_timesteps', type=int, default=1000000,
                         help="total timesteps of the experiments")
@@ -88,11 +90,16 @@ def parser():
                         help="the target KL divergence threshold --> used 0.05 previously")
 
     # MY ARGUMENTS (Base system)
-    parser.add_argument('--eval_representation', action='store_true',)
-    parser.add_argument('--model_loc', type=str, default='/baselines/ae_baselines/dmc_walk_ae')
+    parser.add_argument('--eval_representation', action='store_true',
+                        help='')
+    parser.add_argument('--eval_seed', type=int, default=12,
+                        help='')
+    parser.add_argument('--model_loc', type=str, default='/home/fvs660/cleanrl/cleanrl/my_files/saved_models/')
 
     parser.add_argument('--state_baseline', action='store_true',
                         help="whether to train base PPO on states or on pixels")
+    parser.add_argument('--pixel_baseline', action='store_true',
+                        help="whether to train base PPO directly on pixels")
     parser.add_argument('--action_repeat', type=int, default=2,
                         help="for how many frames to hold an action, 1 the default, regular action")
     parser.add_argument('--framestack', type=int, default=3,
@@ -101,8 +108,6 @@ def parser():
                         help="whether to save reconstructions of the images")
     parser.add_argument('--hidden_dims', type=int, default=1024,
                         help="how many hidden dimensions for the actor-critic networks")
-    parser.add_argument('--activation_function', type=str, default='tanh',
-                        help="activation function to use for the actor-critic system")
     parser.add_argument('--img_size', type=int, default=84,
                         help="image size of the images used to train the PPO agent")
     parser.add_argument('--latent_dims', type=int, default=50,
@@ -115,15 +120,14 @@ def parser():
                         help="the coefficient for the kld on the VAE loss (1.0 for causal, else 1e-8)")
     parser.add_argument('--encoder_lr', type=float, default=1e-3,
                         help="learning rate for the encoder")
-    parser.add_argument('--ae_freeze', type=int, default=1,
+    parser.add_argument('--ae_freeze', type=int, default=2,
                         help="")
     parser.add_argument('--encoderinput_noise', type=float, default=0.05,
                         help="")
 
     # MY ARGUMENTS (Causal)
-    parser.add_argument('--causal', action='store_false',
+    parser.add_argument('--causal', action='store_true',
                         help="whether to use the causal vae to train PPO")
-    parser.add_argument('--causal_coef', type=float, default=1.0)
     parser.add_argument('--causal_hidden_dims', type=int, default=32,
                         help='')
     parser.add_argument('--counter_lr', type=float, default=1e-3)
@@ -171,8 +175,6 @@ def parser():
 
     return parser.parse_args()
 
-# TODO: CURL --> Critic target encoder
-
 
 def make_env(env_id):
     def thunk():
@@ -206,58 +208,34 @@ def make_env(env_id):
     return thunk
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-def weight_init(m):
-    """Custom weight init for Conv2D and Linear layers."""
-    if isinstance(m, nn.Linear):
-        nn.init.orthogonal_(m.weight.data)
-        m.bias.data.fill_(0.0)
-    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-        # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
-        assert m.weight.size(2) == m.weight.size(3)
-        m.weight.data.fill_(0.0)
-        m.bias.data.fill_(0.0)
-        mid = m.weight.size(2) // 2
-        gain = nn.init.calculate_gain('relu')
-        nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
-
-
 class Agent(nn.Module):
     """
     Combines the PPO agent with the citris implementation to allow for the gradients to flow through the value function
     """
     def __init__(self, envs):
         super().__init__()
-        if args.activation_function == 'tanh':
-            act_fn = nn.Tanh()
-        elif args.activation_function == 'relu':
-            act_fn = nn.ReLU()
-        else:
-            act_fn = nn.SiLU()
-
-        input_dims = np.array(envs.single_observation_space.shape).prod() if args.state_baseline else args.latent_dims
+        input_dims = np.array(envs.single_observation_space.shape).prod() if (args.state_baseline or args.pixel_baseline) else args.latent_dims
         input_dims = input_dims if not args.causal else (args.latent_dims * np.prod(envs.single_action_space.shape))
 
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(input_dims, args.hidden_dims)), act_fn,
-            layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(input_dims, args.hidden_dims)),
+            nn.Tanh(),
+            layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)),
+            nn.Tanh(),
             layer_init(nn.Linear(args.hidden_dims, 1), std=1.0),
         )
 
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(input_dims, args.hidden_dims)), act_fn,
-            layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)), act_fn,
+            layer_init(nn.Linear(input_dims, args.hidden_dims)),
+            nn.Tanh(),
+            layer_init(nn.Linear(args.hidden_dims, args.hidden_dims)),
+            nn.Tanh(),
             layer_init(nn.Linear(args.hidden_dims, np.prod(envs.single_action_space.shape)), std=0.01),
         )
 
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
-        if not args.state_baseline:
+        if not (args.state_baseline or args.pixel_baseline):
             self.encoder = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
                                         feature_dim=args.latent_dims, input_noise=args.encoderinput_noise,
                                         num_layers=4, num_filters=32,
@@ -267,21 +245,22 @@ class Agent(nn.Module):
                                         action_size=np.prod(envs.single_action_space.shape),
                                         feature_dim=args.latent_dims, num_layers=4, num_filters=32,
                                         causal=args.causal).to(device)
-            # TODO: Disable when loading
-            self.encoder.apply(weight_init)
-            self.decoder.apply(weight_init)
+            if not args.eval_representation:
+                self.encoder.apply(weight_init)
+                self.decoder.apply(weight_init)
+
             self.decoder_latent_lambda = 1e-6
 
         if args.causal:
-            self.prior = utils.InstantaneousPrior(num_latents=args.latent_dims,
-                                                  c_hid=args.causal_hidden_dims,
-                                                  num_blocks=np.prod(envs.single_action_space.shape),
-                                                  framestack=args.framestack,
-                                                  shared_inputs=args.latent_dims,
-                                                  num_graph_samples=args.num_graph_samples,
-                                                  lambda_sparse=args.lambda_sparse,
-                                                  graph_learning_method="ENCO",
-                                                  autoregressive=args.autoregressive_prior)
+            self.prior = causal_utils.InstantaneousPrior(num_latents=args.latent_dims,
+                                                         c_hid=args.causal_hidden_dims,
+                                                         num_blocks=np.prod(envs.single_action_space.shape),
+                                                         framestack=args.framestack,
+                                                         shared_inputs=args.latent_dims,
+                                                         num_graph_samples=args.num_graph_samples,
+                                                         lambda_sparse=args.lambda_sparse,
+                                                         graph_learning_method="ENCO",
+                                                         autoregressive=args.autoregressive_prior)
 
             self.intv_classifier = causal.InstantaneousTargetClassifier(
                 num_latents=args.latent_dims,
@@ -299,14 +278,14 @@ class Agent(nn.Module):
                                                    c_hid=args.causal_hidden_dims,
                                                    momentum_model=0.9,
                                                    gumbel_temperature=1.0)
-            self.mi_scheduler = utils.SineWarmupScheduler(warmup=50000,
-                                                          start_factor=0.004,
-                                                          end_factor=1.0,
-                                                          offset=20000)
-            self.matrix_exp_scheduler = utils.SineWarmupScheduler(warmup=100000,
-                                                                  start_factor=-6,
-                                                                  end_factor=4,
-                                                                  offset=10000)
+            self.mi_scheduler = causal_utils.SineWarmupScheduler(warmup=50000,
+                                                                 start_factor=0.004,
+                                                                 end_factor=1.0,
+                                                                 offset=20000)
+            self.matrix_exp_scheduler = causal_utils.SineWarmupScheduler(warmup=100000,
+                                                                         start_factor=-6,
+                                                                         end_factor=4,
+                                                                         offset=10000)
             self.causal_encoder = None
             self.all_val_dists = defaultdict(list)
             self.all_v_dicts = []
@@ -316,7 +295,7 @@ class Agent(nn.Module):
             self.encoder_target = make_encoder(encoder_type='pixel', obs_shape=envs.single_observation_space.shape,
                                                feature_dim=args.latent_dims, input_noise=args.encoderinput_noise,
                                                num_layers=4, num_filters=32,
-                                               variational=args.is_vae, curl=True).to(device)
+                                               variational=False, curl=True).to(device)
             self.encoder_target.load_state_dict(self.encoder.state_dict())
             self.CURL = curl.CURL(args.latent_dims, args.curl_latent_dims, self.encoder, self.encoder_target,
                                   output_type='continuous').to(device)
@@ -324,51 +303,38 @@ class Agent(nn.Module):
 
         self.train()
 
+    # SHARED methods
     def train(self, training=True):
         self.actor.train(training)
         self.critic.train(training)
-        if not args.state_baseline:
+        if not (args.state_baseline or args.pixel_baseline):
             self.decoder.train(training)
             self.encoder.train(training)
-        if args.causal:
+        elif args.causal:
             self.prior.train(training)
             self.intv_classifier.train(training)
             self.mi_estimator.train(training)
-        if args.curl:
+        elif args.curl:
             self.CURL.train(training)
             self.encoder_target.train(training)
 
-    def get_val(self, obs):
-        return self.critic(obs)
-
-    def encode_imgs(self, obs):
-        if args.is_vae:
-            z_mean, z_logstd = self.encoder(obs)
-            latent = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
-
-            kld = torch.mean(-0.5 * torch.sum(1 + z_logstd - z_mean ** 2 - z_logstd.exp(), dim=1), dim=0)
-            return kld, latent
-        else:
-            latent = self.encoder(obs)
-            return _, latent
-
     def get_action_and_value(self, x, action=None):
         # Prevent the gradient from flowing through the policy
-        if args.state_baseline:
+        if args.state_baseline or args.pixel_baseline:
             # Streamline the rest of the code
             latent = x
+            if args.pixel_baseline:
+                latent = torch.flatten(x, start_dim=1)
             action_mean = self.actor(latent)
-        elif args.causal:
-            latent = self.get_causal_rep(x)
-            action_mean = self.actor(latent.detach())
-        elif args.curl:
-            # Crop center of image
-            x = curl.center_crop_image(x, args.img_size)
-            _, latent = self.encode_imgs(x)
-            action_mean = self.actor(latent.detach())
         else:
-            _, latent = self.encode_imgs(x)
+            if args.causal:
+                latent = self.get_causal_rep(x)
+            else:
+                if args.curl:
+                    x = curl.center_crop_image(x, args.img_size)
+                latent = self.encoder(x)
             action_mean = self.actor(latent.detach())
+
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -376,33 +342,46 @@ class Agent(nn.Module):
         if action is None:
             action = probs.sample()
             if args.causal:
-                action, intervention = utils.mask_actions(action, dropout_prob=args.action_dropout)
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.get_val(latent), intervention
+                action, intervention = causal_utils.mask_actions(action, device, args.action_dropout)
 
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(latent), intervention
+
+    # AE methods
     def rec_loss(self, obs, target_obs):
-        kld, latent = self.encode_imgs(obs)
+        latent = self.encoder(obs)
 
         if target_obs.dim() == 4:
             # preprocess images to be in [-0.5, 0.5] range
-            target_obs = utils.preprocess_obs(target_obs*255.)
+            target_obs = shared_utils.preprocess_obs(target_obs*255.)
 
         rec_obs = self.decoder(latent)
         rec_loss = F.mse_loss(target_obs, rec_obs)
-        if args.is_vae:
-            rec_loss = kld * args.beta + rec_loss
-        else:
-            # add L2 penalty on latent representation
-            # see https://arxiv.org/pdf/1903.12436.pdf
-            latent_loss = (0.5 * latent.pow(2).sum(1)).mean()
 
-            rec_loss = rec_loss + self.decoder_latent_lambda * latent_loss
+        # add L2 penalty on latent representation
+        # see https://arxiv.org/pdf/1903.12436.pdf
+        latent_loss = (0.5 * latent.pow(2).sum(1)).mean()
+
+        rec_loss = rec_loss + self.decoder_latent_lambda * latent_loss
         return rec_loss, rec_obs, target_obs
 
+    # CURL methods
+    def curl_loss(self, obs_anchor, obs_pos):
+        z_a = self.CURL.encode(obs_anchor)
+        z_pos = self.CURL.encode(obs_pos, ema=True)
+
+        logits = self.CURL.compute_logits(z_a, z_pos)
+        labels = torch.arange(logits.shape[0]).long().to(device)
+        curl_loss = self.cross_entropy_loss(logits, labels)
+
+        return curl_loss
+
+    # CAUSAL methods
     def get_causal_rep(self, obs):
         z_mean, z_logstd = self.encoder(obs)
-        # constrain log_std inside [log_std_min, log_std_max]
 
+        # constrain log_std inside [log_std_min, log_std_max]
         latent_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
+
         # Get latent assignment to causal vars
         target_assignment = self.prior.get_target_assignment(hard=False)
         # Assign latent vals to their respective causal var
@@ -423,11 +402,10 @@ class Agent(nn.Module):
         z_sample = z_sample.flatten(0, 1)
 
         # Preprocess obs --> normalise around 0
-        imgs = utils.preprocess_obs(imgs*255.)
+        imgs = shared_utils.preprocess_obs(imgs*255.)
 
         x_rec = self.decoder(z_sample.unflatten(0, imgs.shape[:2])[:, 1:].flatten(0, 1))
-        z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in
-                                             [z_sample, z_mean, z_logstd, x_rec]]
+        z_sample, z_mean, z_logstd, x_rec = [t.unflatten(0, (imgs.shape[0], -1)) for t in [z_sample, z_mean, z_logstd, x_rec]]
 
         # Calculate KL divergence between every pair of frames
         kld = self.prior.forward(z_sample=z_sample[:, 1:].flatten(0, 1),
@@ -447,7 +425,8 @@ class Agent(nn.Module):
                                                   logger=None,
                                                   target=intervention_targets,
                                                   transition_prior=self.prior)
-        loss = loss + loss_model * args.beta_classifier + loss_z * args.beta_classifier
+        loss = loss + loss_model + loss_z * args.beta_classifier
+
         # Mutual information estimator
         scheduler_factor = self.mi_scheduler.get_factor(global_step)
         loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
@@ -455,8 +434,8 @@ class Agent(nn.Module):
                                                      target=intervention_targets,
                                                      transition_prior=self.prior,
                                                      instant_prob=scheduler_factor)
-        loss = loss + loss_model_mi * args.beta_mi_estimator + loss_z_mi * args.beta_mi_estimator * \
-               (1.0 + 2.0 * scheduler_factor)
+        loss = loss + loss_model_mi + loss_z_mi * args.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
+
         # For stabilizing the mean, since it is unconstrained
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
@@ -466,16 +445,6 @@ class Agent(nn.Module):
                    'mi_estimator_factor': scheduler_factor, 'reg_loss': loss_z_reg, 'causal_loss': loss}
 
         return loss, x_rec, imgs, logging
-
-    def curl_loss(self, obs_anchor, obs_pos):
-        z_a = self.CURL.encode(obs_anchor)
-        z_pos = self.CURL.encode(obs_pos, ema=True)
-
-        logits = self.CURL.compute_logits(z_a, z_pos)
-        labels = torch.arange(logits.shape[0]).long().to(device)
-        curl_loss = self.cross_entropy_loss(logits, labels)
-
-        return curl_loss
 
 
 if __name__ == "__main__":
@@ -495,16 +464,22 @@ if __name__ == "__main__":
         args.action_repeat = 1
         args.clip_coef = 0.2
 
-    if args.causal:
+    elif args.causal:
         args.is_vae = True
         args.state_baseline = False
 
-    if args.curl:
+    elif args.curl:
         args.causal = False
         args.is_vae = False
         args.state_baseline = False
 
-    args.experiment_name = f'runs/{args.env_id}_fromstate{args.state_baseline}_isCausal{args.causal}_causalhid{args.causal_hidden_dims}_isCurl{args.curl}_stack{args.framestack}_targetkl{args.target_kl}_logprobValClip_maxactionintervention_learningdisabledTargetclassifier_32causalhidden_seed{args.seed}'
+    args.experiment_name = f'runs/{args.env_id}_curl{args.curl}_causal{args.causal}_pixel{args.pixel_baseline}_eval{args.eval_representation}_causalhid{args.causal_hidden_dims}_seed{args.seed}'
+    if args.curl:
+        retrain_name = 'curl'
+    elif args.causal:
+        retrain_name = 'causal'
+    else:
+        retrain_name = 'ae'
     run_name = f"{args.experiment_name}"
 
     if args.track:
@@ -519,6 +494,7 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
+
     writer = SummaryWriter(f"{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -533,56 +509,23 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
+    assert device != 'cuda', "No GPU available"
+
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id) for _ in range(args.num_envs)])
     agent = Agent(envs).to(device)
 
-    # Define optimizers
-    if args.state_baseline:
-        agent_params = agent.parameters()
-        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
-    elif args.curl:
-        agent_params = [param for name, param in agent.named_parameters() if
-                        name.startswith('actor') or name.startswith('critic')]
-        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
-        curl_params = [param for name, param in agent.CURL.named_parameters() if not name.startswith('encoder')]
-        optimizer_rep = optim.Adam(
-            [{'params': curl_params},
-             {'params': agent.encoder.parameters(), 'weight_decay': 1e-6}], lr=args.encoder_lr)
-    elif args.causal:
-        graph_params, counter_params, agent_params, other_params = [], [], [], []
-        for name, param in agent.named_parameters():
-            if name.startswith('prior.enco') or name.startswith('prior.notears'):
-                graph_params.append(param)
-            elif name.startswith('intv_classifier') or name.startswith('mi_estimator'):
-                counter_params.append(param)
-            elif name.startswith('actor') or name.startswith('critic'):
-                agent_params.append(param)
-            elif not (name.startswith('encoder') or name.startswith('decoder')):
-                other_params.append(param)
-        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
-        optimizer_rep = optim.Adam(
-            [{'params': graph_params, 'lr': args.graph_lr, 'weight_decay': 0.0, 'eps': 1e-8},
-             {'params': counter_params, 'lr': 2 * args.counter_lr, 'weight_decay': 1e-4},
-             {'params': agent.encoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
-             {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
-             {'params': other_params, 'lr': args.counter_lr, 'weight_decay': 0.0}], lr=args.learning_rate)
-    else:
-        agent_params = [param for name, param in agent.named_parameters() if
-                        name.startswith('actor') or name.startswith('critic')]
-        optimizer_rep = optim.Adam([{'params': agent.encoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
-                                    {'params': agent.decoder.parameters(), 'lr': args.encoder_lr, 'weight_decay': 1e-6},
-                                    ], lr=args.learning_rate)
-        optimizer_ppo = optim.Adam(agent_params, lr=args.learning_rate, eps=1e-5)
+    optimizer_ppo, optimizer_rep, agent_params = shared_utils.make_optimizers(args, agent)
 
     # Load trained model and evaluate
-    if args.eval_representation and not args.state_baseline:
-        print("Loading model")
-        model_path = str(pathlib.Path().absolute()) + args.model_loc + str(args.seed)
+    if args.eval_representation and not (args.state_baseline or args.pixel_baseline):
+        print("Loading model...")
+        model_path = args.model_loc + retrain_name + f'/seed{args.eval_seed}/ppo_causal.cleanrl_model'
         trained_model = torch.load(model_path)
-        agent.load_state_dict(trained_model['model_state_dict'])
-        optimizer_ppo.load_state_dict(trained_model['optimizer_state_dict'])
-        if not args.state_baseline:
-            optimizer_rep.load_state_dict(trained_model['optimizer_ae_state_dict'])
+        # Load only the representation params
+        representation_params = {key: value for key, value in trained_model['model_state_dict'].items() if
+                                 not key.startswith('actor') and not key.startswith('critic')}
+        agent.load_state_dict(representation_params, strict=False)
+        optimizer_rep.load_state_dict(trained_model['optimizer_ae_state_dict'])
 
         # Freeze all parameters except for the PPO actor-critic networks
         params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
@@ -643,18 +586,21 @@ if __name__ == "__main__":
         agent.train(training=False)
         # bootstrap value if not done
         with torch.no_grad():
-            if args.state_baseline:
-                next_value = agent.get_val(next_obs).reshape(1, -1)
-            elif args.causal:
-                causal_rep = agent.get_causal_rep(next_obs)
-                next_value = agent.get_val(causal_rep).reshape(1, -1)
-            elif args.curl:
-                bootstrap_obs = curl.center_crop_image(next_obs, args.img_size)
-                _, latent = agent.encode_imgs(bootstrap_obs)
-                next_value = agent.get_val(latent).reshape(1, -1)
+            if args.state_baseline or args.pixel_baseline:
+                bootstrap_obs = next_obs
+                if args.pixel_baseline:
+                    bootstrap_obs = torch.flatten(bootstrap_obs)
+                next_value = agent.critic(bootstrap_obs).reshape(1, -1)
             else:
-                _, latent = agent.encode_imgs(next_obs)
-                next_value = agent.get_val(latent).reshape(1, -1)
+                bootstrap_obs = next_obs
+                if args.causal:
+                    latent = agent.get_causal_rep(next_obs)
+                else:
+                    if args.curl:
+                        bootstrap_obs = curl.center_crop_image(next_obs, args.img_size)
+                    latent = agent.encoder(bootstrap_obs)
+                next_value = agent.critic(latent).reshape(1, -1)
+
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -754,47 +700,17 @@ if __name__ == "__main__":
                         loss_representation = agent.curl_loss(obs_anchor[mb_inds], obs_pos[mb_inds])
                         if loop % args.curl_encoder_update_freq == 0:
                             curl.soft_update_params(agent.encoder, agent.encoder_target, args.encoder_tau)
-                    elif not args.state_baseline:
+                    elif not (args.state_baseline or args.pixel_baseline):
                         loss_representation, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
 
                 loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-
-                if args.save_img:
-                    if epoch == 0 and loop == 0:
-                        # Save image of an original + reconstruction every policy rollout
-                        path = str(pathlib.Path().absolute()) + '/my_files/data/input_reconstructions'
-                        if not args.causal:
-                            original_imgs = torch.split(target_obs[0], 3)
-                            original_imgs = [img.permute(1, 2, 0).cpu().detach().numpy()+0.5 for img in original_imgs]
-                            rec_imgs = torch.split(rec_obs[0], 3)
-                            rec_imgs = [img.permute(1, 2, 0).cpu().detach().numpy()+0.5 for img in rec_imgs]
-
-                            rec_loss_log = loss_representation
-                        else:
-                            original_imgs = target_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
-                            rec_imgs = rec_obs[0].permute(0, 2, 3, 1).cpu().detach().numpy() + 0.5
-                            rec_loss_log = logging['representation_loss']
-
-                        cv2.imwrite(f"{path}/{global_step}_{0}_original.png", cv2.cvtColor(255*original_imgs[0],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{1}_original.png", cv2.cvtColor(255*original_imgs[1],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        # cv2.imwrite(f"{path}/{global_step}_{2}_original.png", cv2.cvtColor(255*original_imgs[2],
-                        #                                                                    cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(f"{path}/{global_step}_{0}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[0],
-                                                                                           cv2.COLOR_RGB2BGR))
-                        # cv2.imwrite(f"{path}/{global_step}_{1}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[1],
-                        #                                                                    cv2.COLOR_RGB2BGR))
-                        if not args.causal:
-                            cv2.imwrite(f"{path}/{global_step}_{2}_recimg_{rec_loss_log}.png", cv2.cvtColor(255*rec_imgs[2],
-                                                                                           cv2.COLOR_RGB2BGR))
 
                 optimizer_ppo.zero_grad()
                 loss_ppo.backward()
                 nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
                 optimizer_ppo.step()
 
-                if loop % args.ae_freeze == 0 and not args.state_baseline and not args.eval_representation:
+                if loop % args.ae_freeze == 0 and not (args.state_baseline or args.eval_representation or args.pixel_baseline):
                     non_agent_params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
                     optimizer_rep.zero_grad()
                     loss_representation.backward()
@@ -819,7 +735,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        if not args.state_baseline and not args.causal:
+        if not (args.state_baseline or args.causal or args.eval_representation or args.pixel_baseline):
             writer.add_scalar("losses/representation_loss", loss_representation, global_step)
 
         if args.causal:
@@ -836,7 +752,7 @@ if __name__ == "__main__":
 
     if args.save_model:
         model_path = f"{run_name}/{args.exp_name}.cleanrl_model"
-        if args.state_baseline:
+        if args.state_baseline or args.pixel_baseline:
             torch.save({'model_state_dict': agent.state_dict(),
                         'optimizer_state_dict': optimizer_ppo.state_dict()}, model_path)
         else:
@@ -851,34 +767,11 @@ if __name__ == "__main__":
     writer.close()
 
 
-    # TODO: Important iCITRIS notes:
-    #  - kl divergence keeps increasing
-    #  - Frameskip might help, but would slow down the system even more
-    #  - CUDA out of memory problem --> didn't have this before?:
-    #       - Decrease batch size (128 requires 150Gb, 64 requires 75Gb)
-    #           - Works locally if set to 32
-    #       - Separate the Actor-critic hidden dimensions and that of the causal system
-
-    # TODO: AE has a lot of potential --> very low rec_loss, but performance just diminishes at a point?
-    #       - Add noise to the input to make the AE more robust
-    #       - Freeze the AE update for n epochs to allow the PPO to adapt to the new representation (also separate optimisers and losses for encoder and PPO)
-    #           --> Helps stabilise the system
-    #       - Increase the number of hidden dimensions to prevent catastrophic forgetting
-
     # TODO: Default setups:
     #  State baseline: is_vae = false, action_repeat = 1, lr_anneal = true, clip_coef = 0.2
     #  AE: is_vae = false, action_repeat = 2, framestack = 3, lr_anneal = true, clip_coef = 0.1, num_minibatch = 16
-    #  Causal: is_vae = true, causal = true, action_repeat = 2, framestack = 2, beta = 1.0, lr_anneal = true, clip_coef = 0.1,  num_minibatch = 16
+    #  Causal: is_vae = true, causal = true, action_repeat = 2, framestack = 2, beta = 1.0, beta_classifier = 4, causal_hidden_dims = 32
+    #  lr_anneal = true, clip_coef = 0.1,  num_minibatch = 16
     #  IMPORTANT:
     #  - LR_Annealing is really useful for stabilising training and improving performance
     #  - Target_kl to be set at 0.05?
-
-    # TODO CAUSAL FIX --> CLIP APPROX_KL --> ENABLE LEARNING FOR TARGET CLASSIFIER -->:
-    # def kl_divergence(mu_1, var_1, mu_2, var_2, dim=1):
-    #     p = td.Independent(td.Normal(mu_1, torch.sqrt(var_1)), dim)
-    #     q = td.Independent(td.Normal(mu_2, torch.sqrt(var_2)), dim)
-    #     div = td.kl_divergence(p, q)
-    #     div = torch.max(div, div.new_full(div.size(), 3))
-    #     return torch.mean(div)
-
-    # div = torch.max(div, div.new_full(div.size(), 3))
