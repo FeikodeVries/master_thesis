@@ -19,6 +19,7 @@ import pathlib
 import torch.nn.functional as F
 import cv2
 from collections import defaultdict
+import pathlib
 
 from my_files import custom_env_wrappers as mywrapper
 from my_files.encoder_decoder import make_encoder, make_decoder
@@ -54,7 +55,7 @@ def parser():
                         help="whether to upload the saved model to huggingface")
     parser.add_argument('--hf_entity', type=str, default="",
                         help="the user or org name of the model repository from the Hugging Face Hub")
-    parser.add_argument('--env_id', type=str, default="dm_control/walker-stand-v0",
+    parser.add_argument('--env_id', type=str, default="dm_control/walker-walk-v0",
                         help="the id of the environment")
     parser.add_argument('--total_timesteps', type=int, default=1000000,
                         help="total timesteps of the experiments")
@@ -94,8 +95,8 @@ def parser():
                         help='')
     parser.add_argument('--eval_seed', type=int, default=12,
                         help='')
-    parser.add_argument('--model_loc', type=str, default='/home/fvs660/cleanrl/cleanrl/my_files/saved_models/')
-
+    parser.add_argument('--model_loc', type=str, default='/home/fvs660/cleanrl/cleanrl/my_files/saved_models/',
+                        help='On the cluster it is: /home/fvs660/cleanrl/cleanrl/my_files/saved_models/')
     parser.add_argument('--state_baseline', action='store_true',
                         help="whether to train base PPO on states or on pixels")
     parser.add_argument('--pixel_baseline', action='store_true',
@@ -130,6 +131,7 @@ def parser():
                         help="whether to use the causal vae to train PPO")
     parser.add_argument('--causal_hidden_dims', type=int, default=32,
                         help='')
+    parser.add_argument('--hard_rep', action='store_false')
     parser.add_argument('--counter_lr', type=float, default=1e-3)
     parser.add_argument('--graph_lr', type=float, default=5e-4)
     parser.add_argument('--lambda_sparse', type=float, default=0.02,
@@ -138,7 +140,7 @@ def parser():
                         help='number of graph samples to use in ENCO gradient estimation')
     parser.add_argument('--autoregressive_prior', action='store_true',
                         help='whether the prior per causal variable is autoregressive')
-    parser.add_argument('--action_dropout', type=float, default=0.1,
+    parser.add_argument('--action_dropout', type=float, default=0.2,
                         help="how often to intervene on the actions to be able to disentangle the latent space")
     parser.add_argument('--log_std_min', type=int, default=-10,
                         help='')
@@ -341,7 +343,7 @@ class Agent(nn.Module):
         intervention = torch.empty(envs.single_action_space.shape)
         if action is None:
             action = probs.sample()
-            if args.causal:
+            if iteration % args.ae_freeze == 0 and args.causal and not args.eval_representation:
                 action, intervention = causal_utils.mask_actions(action, device, args.action_dropout)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(latent), intervention
@@ -383,7 +385,7 @@ class Agent(nn.Module):
         latent_sample = z_mean + torch.randn_like(z_mean) * z_logstd.exp()
 
         # Get latent assignment to causal vars
-        target_assignment = self.prior.get_target_assignment(hard=False)
+        target_assignment = self.prior.get_target_assignment(hard=args.hard_rep)
         # Assign latent vals to their respective causal var
         latent_causal_assignment = [target_assignment * latent_sample[i][:, None] for i in range(len(latent_sample))]
         latent_causal_assignment = torch.flatten(torch.stack(latent_causal_assignment, dim=0), start_dim=1)
@@ -416,7 +418,9 @@ class Agent(nn.Module):
                                  matrix_exp_factor=np.exp(self.matrix_exp_scheduler.get_factor(global_step)))
         kld = kld.unflatten(0, (imgs.shape[0], -1))
         # Calculate reconstruction loss
+        log_rec_loss = F.mse_loss(x_rec, imgs[:, 1:])
         rec_loss = F.mse_loss(x_rec, imgs[:, 1:], reduction='none').sum(dim=list(range(2, len(x_rec.shape))))
+
         # Combine to full loss
         loss = (kld * args.beta + rec_loss).mean()
 
@@ -440,7 +444,7 @@ class Agent(nn.Module):
         loss_z_reg = (z_sample.mean(dim=[0, 1]) ** 2 + z_sample.std(dim=[0, 1]).log() ** 2).mean()
         loss = loss + 0.1 * loss_z_reg
 
-        logging = {'kld': kld.mean(), 'rec_loss': rec_loss.mean(), 'intv_classifier_z': loss_z,
+        logging = {'kld': kld.mean(), 'ae_rec_loss': log_rec_loss, 'rec_loss': rec_loss.mean(), 'intv_classifier_z': loss_z,
                    'mi_estimator_model': loss_model_mi, 'mi_estimator_z': loss_z_mi,
                    'mi_estimator_factor': scheduler_factor, 'reg_loss': loss_z_reg, 'causal_loss': loss}
 
@@ -473,7 +477,8 @@ if __name__ == "__main__":
         args.is_vae = False
         args.state_baseline = False
 
-    args.experiment_name = f'runs/{args.env_id}_curl{args.curl}_causal{args.causal}_pixel{args.pixel_baseline}_eval{args.eval_representation}_causalhid{args.causal_hidden_dims}_seed{args.seed}'
+    args.experiment_name = f'runs/ae_test/{args.env_id}_curl{args.curl}_causal{args.causal}_pixel{args.pixel_baseline}_eval{args.eval_representation}_seed{args.seed}'
+    # args.experiment_name = f'baselines/causal_baselines/retrained/walk_binary/dmc_causal_walk_seed{args.seed}'
     if args.curl:
         retrain_name = 'curl'
     elif args.causal:
@@ -520,6 +525,7 @@ if __name__ == "__main__":
     if args.eval_representation and not (args.state_baseline or args.pixel_baseline):
         print("Loading model...")
         model_path = args.model_loc + retrain_name + f'/seed{args.eval_seed}/ppo_causal.cleanrl_model'
+        # model_path = str(pathlib.Path(__file__).parent.resolve()) + args.model_loc + f"walk_binary/dmc_causal_walk_seed{args.eval_seed}/ppo_causal.cleanrl_model"
         trained_model = torch.load(model_path)
         # Load only the representation params
         representation_params = {key: value for key, value in trained_model['model_state_dict'].items() if
@@ -553,6 +559,7 @@ if __name__ == "__main__":
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         agent.train(training=True)
+
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
@@ -578,9 +585,16 @@ if __name__ == "__main__":
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
             if "episode" in infos:
-                print(f"global_step={global_step}, episodic_return={infos['episode']['r']}")
-                writer.add_scalar("charts/episodic_return", infos["episode"]["r"], global_step)
-                writer.add_scalar("charts/episodic_length", infos["episode"]["l"], global_step)
+                if args.curl or args.causal and not args.state_baseline and not args.pixel_baseline:
+                    # Only save evaluation policy rollouts
+                    if iteration % args.ae_freeze == 0:
+                        writer.add_scalar("charts/episodic_return", infos["episode"]["r"], global_step)
+                        writer.add_scalar("charts/episodic_length", infos["episode"]["l"], global_step)
+                    print(f"global_step={global_step}, episodic_return={infos['episode']['r']}")
+                else:
+                    print(f"global_step={global_step}, episodic_return={infos['episode']['r']}")
+                    writer.add_scalar("charts/episodic_return", infos["episode"]["r"], global_step)
+                    writer.add_scalar("charts/episodic_length", infos["episode"]["l"], global_step)
 
         # AGENT EVAL
         agent.train(training=False)
@@ -638,7 +652,6 @@ if __name__ == "__main__":
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
-        loop = 0
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             print(f"EPOCH {epoch}")
@@ -693,12 +706,12 @@ if __name__ == "__main__":
 
                 # Calculate representation loss
                 # Freeze autoencoder update to allow PPO to adapt to the representations
-                if loop % args.ae_freeze == 0 and not args.eval_representation:
+                if iteration % args.ae_freeze == 0 and not args.eval_representation:
                     if args.causal:
                         loss_representation, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, global_step)
                     elif args.curl:
                         loss_representation = agent.curl_loss(obs_anchor[mb_inds], obs_pos[mb_inds])
-                        if loop % args.curl_encoder_update_freq == 0:
+                        if iteration % args.curl_encoder_update_freq == 0:
                             curl.soft_update_params(agent.encoder, agent.encoder_target, args.encoder_tau)
                     elif not (args.state_baseline or args.pixel_baseline):
                         loss_representation, rec_obs, target_obs = agent.rec_loss(b_obs[mb_inds], b_obs[mb_inds])
@@ -710,14 +723,13 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
                 optimizer_ppo.step()
 
-                if loop % args.ae_freeze == 0 and not (args.state_baseline or args.eval_representation or args.pixel_baseline):
+                if iteration % args.ae_freeze == 0 and not (args.state_baseline or args.eval_representation or args.pixel_baseline):
                     non_agent_params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
                     optimizer_rep.zero_grad()
                     loss_representation.backward()
                     nn.utils.clip_grad_norm_(non_agent_params, args.max_grad_norm)
                     optimizer_rep.step()
 
-                loop += 1
 
             if args.target_kl != 0.0 and approx_kl > args.target_kl:
                 break
@@ -735,10 +747,12 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        if not (args.state_baseline or args.causal or args.eval_representation or args.pixel_baseline):
+
+        if iteration % args.ae_freeze == 0 and not (args.state_baseline or args.causal
+                                                    or args.eval_representation or args.pixel_baseline):
             writer.add_scalar("losses/representation_loss", loss_representation, global_step)
 
-        if args.causal:
+        if iteration % args.ae_freeze == 0 and args.causal and not args.eval_representation:
             for key, value in logging.items():
                 loss_name = 'causal'
                 writer.add_scalar(f"{loss_name}/{key}", value, global_step)
@@ -766,6 +780,10 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
+    # TODO: Instead of maxing / minimising the causal result, sample from between -1 and 1
+    # TODO: Run ae_walk_baseline with 300 latent dimension to see performance
+    # TODO: Look into causal graph --> give the causal variables names
+    # TODO: Enable and disable interventions during rollout to allow the collection of 'good' states
 
     # TODO: Default setups:
     #  State baseline: is_vae = false, action_repeat = 1, lr_anneal = true, clip_coef = 0.2
