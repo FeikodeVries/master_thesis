@@ -1,12 +1,33 @@
 """Wrapper for augmenting observations by pixel values."""
+from __future__ import annotations
 from typing import Any
 import numpy as np
 import gymnasium as gym
 from collections import deque
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any, Generic, SupportsFloat, TypeVar, Callable
 from gymnasium.error import DependencyNotInstalled
+from gymnasium.spaces import Box
+from gymnasium import Env
+from gymnasium import logger, spaces
+from gymnasium.utils import RecordConstructorArgs, seeding
+from gymnasium import Env
+
 import torch
 
+if TYPE_CHECKING:
+    from gymnasium.envs.registration import EnvSpec, WrapperSpec
 
+
+ObsType = TypeVar("ObsType")
+ActType = TypeVar("ActType")
+RenderFrame = TypeVar("RenderFrame")
+
+WrapperObsType = TypeVar("WrapperObsType")
+WrapperActType = TypeVar("WrapperActType")
+
+
+# HELPER CLASSES
 class ResizeObservation(gym.ObservationWrapper, gym.utils.RecordConstructorArgs):
     """Resize the image observation.
 
@@ -109,7 +130,6 @@ class FrameStack(gym.Wrapper):
         obs = obs / 255.
         self._frames.append(obs)
         return self._get_obs(), reward, termination, truncation, info
-
     def _get_obs(self):
         assert len(self._frames) == self._k
         return np.concatenate(np.array(self._frames), axis=0)
@@ -137,15 +157,50 @@ class NormObsSize(gym.Wrapper):
 
 
 class FrameSkip(gym.Wrapper):
-    def __init__(self, env, frameskip=1):
+    def __init__(self, env, frameskip=1, causal=False, intervention_prob=0.1, intervention_freeze=1, rollout_size=2048):
         gym.Wrapper.__init__(self, env)
         self.frameskip = frameskip
+        self.causal = causal
+        self.current_rollout = 1
+        self.steps_per_rollout = rollout_size
+        self.current_iter = 0
+        # TODO: See if interventions can be learned by intervening directly
+        if self.causal:
+            self.base_env = self.env.env.env.env.env.env.env
+            self.intervention_prob = intervention_prob
+            self.intervention_freeze = intervention_freeze
 
     def step(self, action):
         reward = 0
+        if self.causal:
+            mask = np.random.choice([0, 1], size=(9,), p=[self.intervention_prob, 1 - self.intervention_prob])
+            mask[:3] = 1
+
         for _ in range(self.frameskip):
+            # TODO: Perform intervention on the velocity of a joint, and then perform the action
+            if self.causal and (self.current_rollout % self.intervention_freeze == 0):
+                min_vel = np.min(self.base_env._env.physics.data.qvel)
+                max_vel = np.max(self.base_env._env.physics.data.qvel)
+                # print(f"PREMASK: {self.base_env._env.physics.data.qvel}")
+                self.base_env._env.physics.data.qvel = self.base_env._env.physics.data.qvel * mask
+                self.base_env._env.physics.data.qvel[self.base_env._env.physics.data.qvel == 0] = np.random.uniform(low=min_vel, high=max_vel)
+                # print(f"POSTMASK: {self.base_env._env.physics.data.qvel}")
+                # TODO: Doing the actions alongside interventions causes physics errors
+                action = np.zeros(shape=action.shape)
             obs, r, termination, truncation, info = self.env.step(action)
             reward += r
             if termination or truncation:
+                self.current_iter += 1
                 break
+        if self.causal:
+            intervention = mask
+            intervention[intervention < 1] = 2
+            intervention = intervention - 1
+            info['intervention'] = intervention
+
+        self.current_iter += 1
+        if self.current_iter == (self.steps_per_rollout):
+            self.current_rollout += 1
+            self.current_iter = 0
+
         return obs, reward, termination, truncation, info

@@ -13,13 +13,9 @@ test_seed = 35
 
 file_loc = str(pathlib.Path(__file__).parent.resolve()) + '\ppo_causal.py'
 
-# # Regular AE with fixed AE freeze and increased latent dimension to mimick the causal system
-os.system(f"python {file_loc} --seed {test_seed} --latent_dims {300} --experiment_name {'runs/final_test/ae_largelatent'}")
-
-#
-# os.system(f"python {file_loc} --seed {causal_walk_seeds[0]} --causal")
-# os.system(f"python {file_loc} --seed {causal_walk_seeds[1]} --causal")
-# os.system(f"python {file_loc} --seed {causal_walk_seeds[2]} --causal")
+os.system(f"python {file_loc} --seed {causal_walk_seeds[0]} --causal")
+os.system(f"python {file_loc} --seed {causal_walk_seeds[1]} --causal")
+os.system(f"python {file_loc} --seed {causal_walk_seeds[2]} --causal")
 # os.system(f"python {file_loc} --seed {causal_walk_seeds[3]} --causal")
 # os.system(f"python {file_loc} --seed {causal_walk_seeds[4]} --causal")
 

@@ -26,10 +26,11 @@ class BaseDataset(data.Dataset):
 
     CAUSAL_VAR_NAMES = ['base', 'root']
 
-    def __init__(self, data_folder, img_data, interventions, split='train', single_image=False, seq_len=2, **kwargs):
+    def __init__(self, img_data, interventions, actions, split='train', single_image=False, seq_len=2, **kwargs):
         super().__init__()
         self.imgs = img_data
         self.targets = interventions
+        self.actions = actions
 
         # self._clean_up_data()
         self.split_name = split
@@ -45,18 +46,9 @@ class BaseDataset(data.Dataset):
         :return:
         """
         self.imgs = self.imgs[:, 0:3, :, :]
-        # if len(self.imgs.shape) == 5:
-        #     self.imgs = self.imgs.permute(0, 1, 4, 2, 3)  # Push channels to PyTorch dimension
-        # else:
-        #     pass
-        #     # self.imgs = self.imgs.permute(0, 3, 1, 2)
-
-        self.target_names = ReacherDataset.CAUSAL_VAR_NAMES
-        # print(f'Using the causal variables {self.target_names}')
+        self.target_names = WalkerDataset.CAUSAL_VAR_NAMES
 
     def _prepare_imgs(self, imgs):
-        # TODO: Disabling the multiplication should preserve the original image colour
-        #  --> might also cause NAN issues due to no normalisation
         if self.encodings_active:
             return imgs
         else:
@@ -96,18 +88,21 @@ class BaseDataset(data.Dataset):
         return self.imgs.shape[0] - self.seq_len + 1
 
     def __getitem__(self, idx):
-        returns = []
+        returns_target = []
+        returns_action = []
 
         img_pair = self.imgs[idx:idx + self.seq_len]
+        actions = self.actions[idx:idx + self.seq_len]
         target = self.targets[idx:idx + self.seq_len - 1]
 
         if self.single_image:
             img_pair = img_pair[0]
         else:
-            returns += [target]
+            returns_target += [target]
+            returns_action += [actions]
 
         img_pair = self._prepare_imgs(img_pair)
-        returns = [img_pair] + returns + [idx]
+        returns = [img_pair] + returns_target + returns_action + [idx]
 
         return tuple(returns) if len(returns) > 1 else returns[0]
 

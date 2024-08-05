@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ppo_ae_sretrain
+#SBATCH --job-name=ppo_curl_walk
 #SBATCH --time=40:00:00
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -37,16 +37,20 @@ curl_walker_walk_seeds=(2 5 46 60 84)
 curl_walker_stand_seeds=(93 78 69 51 33)
 curl_walker_run_seeds=(86 6 54 31 23)
 
-seed=${seeds[SLURM_ARRAY_TASK_ID]}
+curl_retrain_walk_seeds=(72 71 67 39 13)
+curl_retrain_stand_seeds=(99 80 54 32 30)
+curl_retrain_run_seeds=(7 57 47 22 10)
+
 ae_eval_seed=${ae_walker_walk_seeds[SLURM_ARRAY_TASK_ID]}
-ae_retrain_seeds=${ae_retrain_stand_seeds[SLURM_ARRAY_TASK_ID]}
+ae_retrain_seeds=${ae_retrain_walk_seeds[SLURM_ARRAY_TASK_ID]}
+
 curl_eval_seed=${curl_walker_walk_seeds[SLURM_ARRAY_TASK_ID]}
-causal_eval_seed=${causal_walker_walk_seeds[SLURM_ARRAY_TASK_ID]}
+curl_retrain_seeds=${curl_retrain_run_seeds[SLURM_ARRAY_TASK_ID]}
 
 # Simple trick to create a unique directory for each run of the script
 echo $$ $ae_eval_seed $1
-mkdir o`echo $$`_dmc_ae_retrain_stand_$seed
-cd o`echo $$`_dmc_ae_retrain_stand_$seed
+mkdir o`echo $$`_dmc_curl_retrain_walk_72
+cd o`echo $$`_dmc_curl_retrain_walk_72
 
 # Run the actual experiment.
-MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed $ae_retrain_seeds --eval_seed $ae_eval_seed "dm_control/walker-stand-v0" --eval_representation --save_model
+MUJOCO_GL=egl python -u /home/fvs660/cleanrl/cleanrl/ppo_causal.py --seed 72 --eval_seed 2 --env_id "dm_control/walker-walk-v0" --curl --eval_representation --save_model

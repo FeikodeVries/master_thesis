@@ -37,8 +37,10 @@ from torch.distributions.normal import Normal
 # test = 1
 import torch
 
-test = torch.Tensor([1])
-test.exp()
+for i in range(1, 10):
+    if i % 2 == 0:
+        print(i)
+        print('hello')
 
 # if args.save_img:
 #     if epoch == 0 and loop == 0:

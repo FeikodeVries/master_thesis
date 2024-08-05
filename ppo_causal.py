@@ -5,13 +5,14 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import random
 import time
-# import cProfile, pstats
+import cProfile, pstats
 import gymnasium as gym
 # import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+#from PIL import Image
 from shimmy.registration import DM_CONTROL_SUITE_ENVS
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
@@ -35,7 +36,7 @@ def parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__)[: -len(".py")],
                         help="""the name of this experiment""")
-    parser.add_argument('--seed', type=int, default=78,
+    parser.add_argument('--seed', type=int, default=35,
                         help="""seed of the experiment""")
     parser.add_argument('--torch_deterministic', type=bool, default=True,
                         help="""if toggled, `torch.backends.cudnn.deterministic=False`""")
@@ -93,9 +94,9 @@ def parser():
     # MY ARGUMENTS (Base system)
     parser.add_argument('--eval_representation', action='store_true',
                         help='')
-    parser.add_argument('--eval_seed', type=int, default=12,
+    parser.add_argument('--eval_seed', type=int, default=16,
                         help='')
-    parser.add_argument('--model_loc', type=str, default='/home/fvs660/cleanrl/cleanrl/my_files/saved_models/',
+    parser.add_argument('--model_loc', type=str, default='/baselines/causal_baselines/from_scratch/',
                         help='On the cluster it is: /home/fvs660/cleanrl/cleanrl/my_files/saved_models/')
     parser.add_argument('--state_baseline', action='store_true',
                         help="whether to train base PPO on states or on pixels")
@@ -127,7 +128,7 @@ def parser():
                         help="")
 
     # MY ARGUMENTS (Causal)
-    parser.add_argument('--causal', action='store_true',
+    parser.add_argument('--causal', action='store_false',
                         help="whether to use the causal vae to train PPO")
     parser.add_argument('--causal_hidden_dims', type=int, default=32,
                         help='')
@@ -140,7 +141,7 @@ def parser():
                         help='number of graph samples to use in ENCO gradient estimation')
     parser.add_argument('--autoregressive_prior', action='store_true',
                         help='whether the prior per causal variable is autoregressive')
-    parser.add_argument('--action_dropout', type=float, default=0.2,
+    parser.add_argument('--intervention_prob', type=float, default=0.2,
                         help="how often to intervene on the actions to be able to disentangle the latent space")
     parser.add_argument('--log_std_min', type=int, default=-10,
                         help='')
@@ -197,7 +198,9 @@ def make_env(env_id):
             # Stack the frames in a rolling manner
             env = gym.wrappers.AddRenderObservation(env, render_only=True)
             env = mywrapper.ResizeObservation(env, shape=(args.img_size if not args.curl else args.pre_transform_img_size))
-            env = mywrapper.FrameSkip(env, frameskip=args.action_repeat)
+            env = mywrapper.FrameSkip(env, frameskip=args.action_repeat, causal=args.causal,
+                                      intervention_prob=args.intervention_prob, intervention_freeze=args.ae_freeze,
+                                      rollout_size=args.num_steps)
             if not args.causal:
                 env = mywrapper.FrameStack(env, k=args.framestack)
             else:
@@ -257,7 +260,6 @@ class Agent(nn.Module):
             self.prior = causal_utils.InstantaneousPrior(num_latents=args.latent_dims,
                                                          c_hid=args.causal_hidden_dims,
                                                          num_blocks=np.prod(envs.single_action_space.shape),
-                                                         framestack=args.framestack,
                                                          shared_inputs=args.latent_dims,
                                                          num_graph_samples=args.num_graph_samples,
                                                          lambda_sparse=args.lambda_sparse,
@@ -267,7 +269,7 @@ class Agent(nn.Module):
             self.intv_classifier = causal.InstantaneousTargetClassifier(
                 num_latents=args.latent_dims,
                 num_blocks=np.prod(envs.single_action_space.shape),
-                c_hid=args.causal_hidden_dims * 2,
+                c_hid=args.causal_hidden_dims*2,
                 num_layers=1,
                 act_fn=nn.SiLU,
                 momentum_model=0.9,
@@ -343,8 +345,9 @@ class Agent(nn.Module):
         intervention = torch.empty(envs.single_action_space.shape)
         if action is None:
             action = probs.sample()
-            if iteration % args.ae_freeze == 0 and args.causal and not args.eval_representation:
-                action, intervention = causal_utils.mask_actions(action, device, args.action_dropout)
+            # if iteration % args.ae_freeze == 0 and args.causal and not args.eval_representation:
+            #     intervention = torch.empty(envs.single_action_space.shape)
+            # action, intervention = causal_utils.mask_actions(action, device, args.intervention_prob)
 
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(latent), intervention
 
@@ -392,7 +395,7 @@ class Agent(nn.Module):
 
         return latent_causal_assignment
 
-    def causal_loss(self, imgs, intervention_targets, global_step):
+    def causal_loss(self, imgs, intervention_targets, actions, global_step):
         target = intervention_targets
 
         # En- and decode every element
@@ -412,6 +415,7 @@ class Agent(nn.Module):
         # Calculate KL divergence between every pair of frames
         kld = self.prior.forward(z_sample=z_sample[:, 1:].flatten(0, 1),
                                  z_mean=z_mean[:, 1:].flatten(0, 1),
+                                 action=actions[:, :-1].flatten(0, 1),
                                  z_logstd=z_logstd[:, 1:].flatten(0, 1),
                                  target=target.flatten(0, 1),
                                  z_shared=z_sample[:, :-1].flatten(0, 1),
@@ -426,18 +430,22 @@ class Agent(nn.Module):
 
         # Target classifier
         loss_model, loss_z = self.intv_classifier(z_sample=z_sample,
+                                                  action=actions,
                                                   logger=None,
                                                   target=intervention_targets,
                                                   transition_prior=self.prior)
+
         loss = loss + loss_model + loss_z * args.beta_classifier
 
         # Mutual information estimator
         scheduler_factor = self.mi_scheduler.get_factor(global_step)
         loss_model_mi, loss_z_mi = self.mi_estimator(z_sample=z_sample,
+                                                     action=actions,
                                                      logger=None,
                                                      target=intervention_targets,
                                                      transition_prior=self.prior,
                                                      instant_prob=scheduler_factor)
+
         loss = loss + loss_model_mi + loss_z_mi * args.beta_mi_estimator * (1.0 + 2.0 * scheduler_factor)
 
         # For stabilizing the mean, since it is unconstrained
@@ -477,7 +485,7 @@ if __name__ == "__main__":
         args.is_vae = False
         args.state_baseline = False
 
-    args.experiment_name = f'runs/ae_test/{args.env_id}_curl{args.curl}_causal{args.causal}_pixel{args.pixel_baseline}_eval{args.eval_representation}_seed{args.seed}'
+    args.experiment_name = f'runs/action_included/{args.env_id}_curl{args.curl}_causal{args.causal}_pixel{args.pixel_baseline}_eval{args.eval_representation}_seed{args.seed}'
     # args.experiment_name = f'baselines/causal_baselines/retrained/walk_binary/dmc_causal_walk_seed{args.seed}'
     if args.curl:
         retrain_name = 'curl'
@@ -519,13 +527,14 @@ if __name__ == "__main__":
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id) for _ in range(args.num_envs)])
     agent = Agent(envs).to(device)
 
+    test = envs.metadata
     optimizer_ppo, optimizer_rep, agent_params = shared_utils.make_optimizers(args, agent)
 
     # Load trained model and evaluate
     if args.eval_representation and not (args.state_baseline or args.pixel_baseline):
         print("Loading model...")
-        model_path = args.model_loc + retrain_name + f'/seed{args.eval_seed}/ppo_causal.cleanrl_model'
-        # model_path = str(pathlib.Path(__file__).parent.resolve()) + args.model_loc + f"walk_binary/dmc_causal_walk_seed{args.eval_seed}/ppo_causal.cleanrl_model"
+        # model_path = args.model_loc + retrain_name + f'/seed{args.eval_seed}/ppo_causal.cleanrl_model'
+        model_path = str(pathlib.Path(__file__).parent.resolve()) + args.model_loc + f"walk_binary/dmc_causal_walk_seed{args.eval_seed}/ppo_causal.cleanrl_model"
         trained_model = torch.load(model_path)
         # Load only the representation params
         representation_params = {key: value for key, value in trained_model['model_state_dict'].items() if
@@ -537,6 +546,9 @@ if __name__ == "__main__":
         params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
         for param in params:
             param.requires_grad = False
+
+        graph = agent.prior.get_adj_matrix()
+        test = 1
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -565,10 +577,15 @@ if __name__ == "__main__":
             lrnow = frac * args.learning_rate
             optimizer_ppo.param_groups[0]["lr"] = lrnow
 
+        print(f"Interventions active: {iteration % args.ae_freeze == 0}")
+
         for step in range(0, args.num_steps):
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
+            # print(f"STEP: {step} GLOBAL_STEP: {global_step}")
+
+            # print(f"TEST: args.num_envs{args.num_envs}")
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
@@ -576,7 +593,12 @@ if __name__ == "__main__":
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
-            interventions[step] = intervention
+
+            # # TODO: View the DM_control physics values -->
+            # #  don't change the action if the intervention takes place,
+            # #  instead set velocity of the joint to 0 and then perform the action
+            # env_test = envs.envs[0].env.env.env.env.env.env.env.env.env.env.env
+            # env_intervened = env_test._env.physics
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
@@ -584,10 +606,13 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
+            if "intervention" in infos:
+                interventions[step] = torch.from_numpy(infos["intervention"][0][3:])
+
             if "episode" in infos:
-                if args.curl or args.causal and not args.state_baseline and not args.pixel_baseline:
+                if args.curl or args.causal and not (args.state_baseline or args.pixel_baseline):
                     # Only save evaluation policy rollouts
-                    if iteration % args.ae_freeze == 0:
+                    if iteration % args.ae_freeze != 0:
                         writer.add_scalar("charts/episodic_return", infos["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", infos["episode"]["l"], global_step)
                     print(f"global_step={global_step}, episodic_return={infos['episode']['r']}")
@@ -637,7 +662,7 @@ if __name__ == "__main__":
         b_values = values.reshape(-1)
 
         b_interventions = interventions.reshape((-1,) + envs.single_action_space.shape)
-        b_interventions = torch.abs(b_interventions - 1)
+        b_interventions = torch.abs(b_interventions - 1)  # --> Flips the intervention
 
         if args.curl:
             pos = torch.clone(b_obs)
@@ -645,7 +670,7 @@ if __name__ == "__main__":
             obs_pos = curl.random_crop(pos, args.img_size)
 
         if args.causal:
-            _, data_loaders, _ = load_data_new(args, b_obs, b_interventions, args.env_id, seq_len=args.framestack)
+            _, data_loaders, _ = load_data_new(args, b_obs, b_interventions, b_actions, args.env_id, seq_len=args.framestack)
         else:
             data_loaders = None
 
@@ -655,14 +680,23 @@ if __name__ == "__main__":
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             print(f"EPOCH {epoch}")
+            minbatch = 0
             for i in (data_loaders['train'] if args.causal else range(0, args.batch_size, args.minibatch_size)):
                 if args.causal:
                     img_pairs = i[0]
                     targets = i[1]
-                    mb_inds = np.array(i[2])
+                    stacked_actions = i[2]
+                    mb_inds = np.array(i[3])
+                    # count = 0
+                    # for pairs in img_pairs:
+                    #     img = (pairs[0].permute(1,2,0)*255).detach().cpu().numpy().astype(np.uint8)
+                    #     save_img = Image.fromarray(img)
+                    #     save_img.save(f'runs/images/epoch{epoch}_minbatch{minbatch}_img{count}.png')
+                    #     count += 1
                 else:
                     end = i + args.minibatch_size
                     mb_inds = b_inds[i:end]
+                minbatch += 1
 
                 _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
 
@@ -708,7 +742,7 @@ if __name__ == "__main__":
                 # Freeze autoencoder update to allow PPO to adapt to the representations
                 if iteration % args.ae_freeze == 0 and not args.eval_representation:
                     if args.causal:
-                        loss_representation, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, global_step)
+                        loss_representation, rec_obs, target_obs, logging = agent.causal_loss(img_pairs, targets, stacked_actions, global_step)
                     elif args.curl:
                         loss_representation = agent.curl_loss(obs_anchor[mb_inds], obs_pos[mb_inds])
                         if iteration % args.curl_encoder_update_freq == 0:
@@ -718,10 +752,18 @@ if __name__ == "__main__":
 
                 loss_ppo = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-                optimizer_ppo.zero_grad()
-                loss_ppo.backward()
-                nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
-                optimizer_ppo.step()
+                # TODO: Prevent PPO from learning from iterations with interventions on the velocity
+                if args.causal:
+                    if iteration % args.ae_freeze != 0:
+                        optimizer_ppo.zero_grad()
+                        loss_ppo.backward()
+                        nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
+                        optimizer_ppo.step()
+                else:
+                    optimizer_ppo.zero_grad()
+                    loss_ppo.backward()
+                    nn.utils.clip_grad_norm_(agent_params, args.max_grad_norm)
+                    optimizer_ppo.step()
 
                 if iteration % args.ae_freeze == 0 and not (args.state_baseline or args.eval_representation or args.pixel_baseline):
                     non_agent_params = [param for name, param in agent.named_parameters() if not name.startswith('actor') and not name.startswith('critic')]
@@ -729,7 +771,6 @@ if __name__ == "__main__":
                     loss_representation.backward()
                     nn.utils.clip_grad_norm_(non_agent_params, args.max_grad_norm)
                     optimizer_rep.step()
-
 
             if args.target_kl != 0.0 and approx_kl > args.target_kl:
                 break
@@ -780,10 +821,14 @@ if __name__ == "__main__":
     envs.close()
     writer.close()
 
-    # TODO: Instead of maxing / minimising the causal result, sample from between -1 and 1
-    # TODO: Run ae_walk_baseline with 300 latent dimension to see performance
-    # TODO: Look into causal graph --> give the causal variables names
-    # TODO: Enable and disable interventions during rollout to allow the collection of 'good' states
+    # TODO: Add action to all systems:
+    #   - Look into the interventions and see if I should give them another value? --> Instead of using an action
+    #   to represent an intervention, directly alter the velocity? (set it to 0 and then give it a random value?)
+    #   When doing this, be very careful about having the PPO learning from the iterations with interventions active, as it can drastically fling the robot
+
+    # TODO:
+    #   Test new setup
+
 
     # TODO: Default setups:
     #  State baseline: is_vae = false, action_repeat = 1, lr_anneal = true, clip_coef = 0.2

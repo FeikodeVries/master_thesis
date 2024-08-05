@@ -45,15 +45,13 @@ class DataHandling:
         return filepath
 
 
-def load_data_new(args, img_data, interventions, env_name, seq_len=3):
+def load_data_new(args, img_data, interventions, actions, env_name, seq_len=3):
     print('Loading data...')
     env_name = env_name.split('-')[0]
     DataClass = WalkerDataset
     dataset_args = {}
-    test_args = lambda train_set: {'causal_vars': train_set.target_names}
-    folder = str(pathlib.Path(__file__).parent.resolve()) + '/data/'
 
-    train_data = DataClass(data_folder=folder, img_data=img_data, interventions=interventions,
+    train_data = DataClass(img_data=img_data, interventions=interventions, actions=actions,
                            split='train', single_image=False, seq_len=seq_len, **dataset_args)
     # TODO: pin_memory and num_workers had to be disabled to allow for the use of dataloaders strangely
     train_loader = data.DataLoader(train_data, batch_size=args.minibatch_size, shuffle=False,

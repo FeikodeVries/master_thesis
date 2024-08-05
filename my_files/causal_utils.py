@@ -9,7 +9,6 @@ import pathlib
 import random
 
 
-
 # METHODS: MODULES
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
     """ Learning rate scheduler with Cosine annealing and warmup """
@@ -192,7 +191,6 @@ class InstantaneousPrior(nn.Module):
                  lambda_sparse=0.02,
                  gumbel_temperature=1.0,
                  num_graph_samples=8,
-                 framestack=3,
                  graph_learning_method='ENCO',
                  autoregressive=False):
         """
@@ -230,9 +228,10 @@ class InstantaneousPrior(nn.Module):
         self.autoregressive = autoregressive
         self.num_graph_samples = num_graph_samples
 
-        self.target_params = nn.Parameter(torch.zeros(num_latents, num_blocks))
+        self.target_params = nn.Parameter(torch.zeros(num_latents, self.num_blocks))
+        # By multiplying num_blocks by 4, it also accounts for the action to be included
         self.net = nn.Sequential(
-            MultivarLinear(self.num_latents * 2 + self.num_blocks + self.shared_inputs, c_hid, [self.num_latents]),
+            MultivarLinear(self.num_latents * 2 + self.num_blocks * 4 + self.shared_inputs, c_hid, [self.num_latents]),
             MultivarLayerNorm(c_hid, [self.num_latents]),
             nn.SiLU(),
             MultivarLinear(c_hid, c_hid, [self.num_latents]),
@@ -258,7 +257,7 @@ class InstantaneousPrior(nn.Module):
         self.train_graph = True
         self.gradient_efficient = True
 
-    def forward(self, z_sample, target, z_mean=None, z_logstd=None, num_graph_samples=-1, z_shared=None,
+    def forward(self, z_sample, target, action, z_mean=None, z_logstd=None, num_graph_samples=-1, z_shared=None,
                 matrix_exp_factor=0.0):
         """
         Calculate the NLL or KLD of samples under an instantaneous prior.
@@ -283,9 +282,11 @@ class InstantaneousPrior(nn.Module):
         matrix_exp_factor : float
                             The weight of the acyclicity regularizer of NOTEARS
         """
+        # TODO: When to append the action to the latent? Make it integral seems the most logical step
         batch_size = z_sample.shape[0]
         if len(z_sample.shape) == 2:
             z_sample = z_sample[:, None]  # Add a 'sample' dimension
+            action = action[:, None]
             if z_shared is not None:
                 z_shared = z_shared[:, None]
         num_z_samples = z_sample.shape[1]
@@ -354,14 +355,26 @@ class InstantaneousPrior(nn.Module):
             z_shared = []
         else:
             # z_shared: shape [batch, num_z_samples, shared_inputs]
+            # Add the actions to the shared input
+            z_shared = torch.cat([z_shared, action], dim=-1)
             # -> [batch, num_z_samples, num_graph_samples, causal_vars, latent_vars, shared_inputs]
             z_shared = z_shared[:, :, None, None, None, :].expand(-1, -1, num_graph_samples, self.num_blocks,
                                                                   self.num_latents, -1)
             z_shared = [z_shared]
 
+        # MYCODE: Integrate action into causal system | Add the actions to the latent mask
+        mask_size = list(latent_mask.shape)
+        mask_size[-1] = self.num_blocks
+        action_mask = torch.ones(tuple(mask_size)).to(latent_mask.device)
+        latent_mask = torch.cat([latent_mask, action_mask], dim=-1)
+
+        # Add the actions to the latent input
+        z_sample = torch.cat([z_sample, action], dim=-1)
+
         # Obtain predictions from network
         z_inp = torch.cat([z_sample[:, :, None, None, None, :] * latent_mask,
                            latent_mask * 2 - 1, target_input] + z_shared, dim=-1)
+
         s = 1
         # For efficiency, we run 1 sample differentiably for the distribution parameters,
         # and all without gradients since ENCO doesn't need gradients through the networks

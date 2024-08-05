@@ -58,10 +58,12 @@ class TargetClassifier(nn.Module):
         self.num_blocks = num_blocks
         self.use_conditional_targets = use_conditional_targets
         self.dist_steps = 0.0
+        self.c_hid = c_hid
 
         # Network creation
         norm = lambda c: (nn.LayerNorm(c) if use_normalization else nn.Identity())
-        layers = [nn.Linear(3 * num_latents, 2 * c_hid), norm(2 * c_hid), act_fn()]
+        # MYCODE: What kind of input
+        layers = [nn.Linear(3 * num_latents + self.num_blocks, 2*c_hid), norm(2 * c_hid), act_fn()]
         inp_dim = 2 * c_hid
         for _ in range(num_layers - 1):
             layers += [nn.Linear(inp_dim, c_hid), norm(c_hid), act_fn()]
@@ -129,7 +131,7 @@ class TargetClassifier(nn.Module):
         else:
             return f'[{self.var_names[t]}]'
 
-    def forward(self, z_sample, target, transition_prior, logger=None):
+    def forward(self, z_sample, target, action, transition_prior, logger=None):
         """
         Calculates the loss for the target classifier (predict all intervention targets from all sets of latents)
         and the latents + psi (predict only its respective intervention target from a set of latents).
@@ -263,7 +265,7 @@ class InstantaneousTargetClassifier(TargetClassifier):
                 all_probs.append(counter_prob)
             self.target_counter_prob = torch.stack(all_probs, dim=-1)
 
-    def forward(self, z_sample, target, transition_prior, logger=None, add_anc_prob=0.0):
+    def forward(self, z_sample, target, action, transition_prior, logger=None, add_anc_prob=0.0):
         """
         Calculates the loss for the target classifier (predict all intervention targets from all sets of latents)
         and the latents + psi (predict only its respective intervention target from a set of latents).
@@ -300,7 +302,9 @@ class InstantaneousTargetClassifier(TargetClassifier):
         num_targets = target_assignment.shape[-1]
 
         target_assignment = target_assignment.transpose(-2, -1)  # shape [batch, time_steps, num_targets, latent_vars]
+
         z_sample = z_sample[..., None, :].expand(-1, -1, num_targets, -1)
+        action = action[..., None, :].expand(-1, -1, num_targets, -1)
         exp_target = target[..., None, :].expand(-1, -1, num_targets, -1).flatten(0, 2).float()
 
         # Sample adjacency matrices
@@ -322,7 +326,19 @@ class InstantaneousTargetClassifier(TargetClassifier):
         # Model step => Cross entropy loss on targets for all sets of latents
         z_sample_model = z_sample.detach()
         latent_mask_det = latent_mask.detach()
+
+        # # MYCODE: Integrate action into causal system | Add the actions to the latent mask
+        # mask_size = list(latent_mask_det.shape)
+        # mask_size[-1] = self.num_blocks
+        # action_mask = torch.ones(tuple(mask_size)).to(latent_mask_det.device)
+        # latent_mask_det = torch.cat([latent_mask_det, action_mask], dim=-1)
+        #
+        # # Add the actions to the latent input
+        # z_sample_model = torch.cat([z_sample_model, action], dim=-1)
+
         model_inps = torch.cat([z_sample_model[:, :-1], z_sample_model[:, 1:] * latent_mask_det, latent_mask_det], dim=-1)
+        model_inps = torch.cat([model_inps, action[:, :-1]], dim=-1)
+
         model_inps = model_inps.flatten(0, 2)
         model_pred = self.classifiers(model_inps)
         loss_model = F.binary_cross_entropy_with_logits(model_pred, exp_target, reduction='none')
@@ -355,7 +371,10 @@ class InstantaneousTargetClassifier(TargetClassifier):
 
         # Latent step => Cross entropy loss on true targets for respective sets of latents, and cross entropy loss on marginal (conditional) accuracy otherwise.
         z_inps = torch.cat([z_sample[:, :-1], z_sample[:, 1:] * latent_mask, latent_mask], dim=-1)
+        # MYCODE: Add the actions to the latent input
+        z_inps = torch.cat([z_inps, action[:, :-1]], dim=-1)
         z_inps = z_inps.flatten(0, 2)
+
         z_pred = self.exp_classifiers(z_inps)
         z_pred_unflatten = z_pred.unflatten(0, (batch_size * time_steps, num_targets))
         if hasattr(self, 'avg_cond_dist'):
@@ -441,9 +460,9 @@ class MIEstimator(nn.Module):
         self.num_latents = num_latents
         self.c_hid = c_hid * 2
 
-        # Network creation
+        # Network creation --> multiplying num_blocks by 2 allows for integrating the action
         self.mi_estimator = nn.Sequential(
-            nn.Linear(num_latents * 3 + num_blocks, self.c_hid),
+            nn.Linear(num_latents * 3 + num_blocks * 4, self.c_hid),
             nn.LayerNorm(self.c_hid),
             act_fn(),
             nn.Linear(self.c_hid, self.c_hid),
@@ -477,7 +496,7 @@ class MIEstimator(nn.Module):
         else:
             return f'[{self.var_names[t]}]'
 
-    def forward(self, z_sample, target, transition_prior, logger=None, instant_prob=None):
+    def forward(self, z_sample, target, action, transition_prior, logger=None, instant_prob=None):
         """
         Calculates the loss for the mutual information estimator.
 
@@ -496,6 +515,7 @@ class MIEstimator(nn.Module):
             self._step_exp_avg()
 
         target = target.flatten(0, 1)
+        z_sample = torch.cat([z_sample, action], dim=-1)
         z_sample_0 = z_sample[:, :-1].flatten(0, 1)
         z_sample_1 = z_sample[:, 1:].flatten(0, 1)
         # Find samples for which certain variables have been intervened upon
@@ -522,6 +542,12 @@ class MIEstimator(nn.Module):
         graph_samples = graph_samples - torch.eye(graph_samples.shape[1], device=graph_samples.device)[
             None]  # Self-connection (-1), parents (1), others (0)
         latent_mask = (target_assignment[:, :, :, None] * graph_samples[:, None, :, :]).sum(dim=-2).transpose(1, 2)
+
+        # MYCODE: Integrate action into causal system | Add the actions to the latent mask
+        mask_size = list(latent_mask.shape)
+        mask_size[-1] = self.num_blocks
+        action_mask = torch.ones(tuple(mask_size)).to(latent_mask.device)
+        latent_mask = torch.cat([latent_mask, action_mask], dim=-1)
 
         # Prepare positive pairs
         z_sample_sel_0 = z_sample_0[idxs_stack]
